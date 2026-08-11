@@ -1,0 +1,24 @@
+[workspace]
+members = [
+  "crates/rp-protocol",
+  "crates/rp-web-authn",
+  "crates/rp-broker-core",
+  "crates/rp-broker-api",
+  "crates/rp-relay",
+  "crates/rp-cli",
+  "crates/rp-testkit",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+repository = "https://github.com/OWNER/rootpermit"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }

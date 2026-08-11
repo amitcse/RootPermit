@@ -1,0 +1,16 @@
+/target/
+/node_modules/
+/dist/
+/coverage/
+/.env
+/.env.*
+!/env.example
+*.sqlite
+*.sqlite-*
+*.key
+*.pem
+*.p12
+*.deb
+*.spdx.json
+*.cdx.json
+artifacts/
