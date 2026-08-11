@@ -17,6 +17,52 @@ use thiserror::Error;
 pub const MAX_FRAME_PAYLOAD_BYTES: usize = 65_536;
 pub const FRAME_LENGTH_BYTES: usize = 4;
 
+/// Kernel-provided Unix peer identity. These values are intentionally absent
+/// from every RPC CBOR message. A platform socket adapter must construct this
+/// only from `SO_PEERCRED` after accepting the connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCredentials {
+    pub pid: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+impl PeerCredentials {
+    #[must_use]
+    pub const fn from_so_peer_cred(pid: u32, uid: u32, gid: u32) -> Self {
+        Self { pid, uid, gid }
+    }
+
+    #[must_use]
+    pub const fn is_root(self) -> bool {
+        self.uid == 0
+    }
+}
+
+/// Applies the part of the local authorization contract that does not require
+/// a database lookup. Object ownership is checked separately through
+/// `can_access_owned_request`; callers must map any failure to the generic
+/// visibility error so a foreign request is never enumerable.
+pub fn authorize_method(peer: PeerCredentials, method: Method) -> Result<(), ErrorCode> {
+    if method.is_root_only() && !peer.is_root() {
+        return Err(ErrorCode::NotAllowed);
+    }
+    Ok(())
+}
+
+/// Returns whether a peer can access an object owned by `owner_uid`. Root is
+/// the only cross-UID reader. This predicate intentionally returns no reason.
+#[must_use]
+pub const fn can_access_owned_request(peer: PeerCredentials, owner_uid: u32) -> bool {
+    peer.is_root() || peer.uid == owner_uid
+}
+
+/// The sole externally visible result for absent and foreign requester objects.
+#[must_use]
+pub const fn concealed_visibility_error() -> ErrorCode {
+    ErrorCode::NotFoundOrNotAuthorized
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessClass {
     Peer,
@@ -178,7 +224,8 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
-    const fn text(self) -> &'static str {
+    #[must_use]
+    pub const fn text(self) -> &'static str {
         match self {
             Self::InvalidInput => "invalid_input",
             Self::NotAllowed => "not_allowed",
@@ -541,6 +588,21 @@ mod tests {
         assert!(Method::RootStartPairing.is_root_only());
         assert!(!Method::GetRequest.is_root_only());
         assert!(!Method::SubmitPackageInstall.is_root_only());
+    }
+
+    #[test]
+    fn peer_credentials_are_not_wire_claims_and_enforce_root_and_owner_boundaries() {
+        let owner = PeerCredentials::from_so_peer_cred(11, 1000, 1000);
+        let foreign = PeerCredentials::from_so_peer_cred(12, 1001, 1001);
+        let root = PeerCredentials::from_so_peer_cred(1, 0, 0);
+
+        assert_eq!(authorize_method(owner, Method::SubmitPackageInstall), Ok(()));
+        assert_eq!(authorize_method(owner, Method::RootPurge), Err(ErrorCode::NotAllowed));
+        assert_eq!(authorize_method(root, Method::RootPurge), Ok(()));
+        assert!(can_access_owned_request(owner, 1000));
+        assert!(!can_access_owned_request(foreign, 1000));
+        assert!(can_access_owned_request(root, 1000));
+        assert_eq!(concealed_visibility_error(), ErrorCode::NotFoundOrNotAuthorized);
     }
 
     #[test]

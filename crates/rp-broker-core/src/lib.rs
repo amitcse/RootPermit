@@ -9,8 +9,9 @@
 use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, params,
 };
+use rp_protocol::{CborValue, Decision, Digest, Domain, digest_cbor};
 use sha2::{Digest as _, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 const LOCAL_DEVICE_ID: &str = "AAAAAAAAAAAAAAAAAAAAAA";
@@ -375,6 +376,9 @@ impl BrokerStore {
                 request_id TEXT NOT NULL REFERENCES requests (request_id) ON DELETE RESTRICT,
                 sequence INTEGER NOT NULL CHECK (sequence > 0),
                 state TEXT NOT NULL,
+                reason INTEGER NOT NULL CHECK (reason > 0),
+                previous_event_digest BLOB CHECK (previous_event_digest IS NULL OR length(previous_event_digest) = 32),
+                event_digest BLOB NOT NULL CHECK (length(event_digest) = 32),
                 PRIMARY KEY (request_id, sequence)
             );
             "
@@ -426,9 +430,17 @@ impl BrokerStore {
                 i64::try_from(request.generation).map_err(|_| BrokerError::NumericOutOfRange)?,
             ],
         )?;
+        let event_digest = lifecycle_event_digest(
+            &request.request_id,
+            1,
+            None,
+            RequestState::Planning,
+            TransitionReason::Created,
+        );
         transaction.execute(
-            "INSERT INTO request_events (request_id, sequence, state) VALUES (?1, 1, 'planning')",
-            [request.request_id.as_str()],
+            "INSERT INTO request_events (request_id, sequence, state, reason, previous_event_digest, event_digest)
+             VALUES (?1, 1, 'planning', ?2, NULL, ?3)",
+            params![request.request_id.as_str(), TransitionReason::Created.code(), event_digest.as_slice()],
         )?;
         transaction.commit()?;
         Ok(SubmitOutcome::Created(RequestSummary {
@@ -461,12 +473,32 @@ impl BrokerStore {
                 None => Err(BrokerError::NotFound),
             };
         }
+        let (sequence, previous_event_digest) = transaction.query_row(
+            "SELECT sequence, event_digest FROM request_events WHERE request_id = ?1 ORDER BY sequence DESC LIMIT 1",
+            [request_id.as_str()],
+            |row| {
+                let sequence = row.get::<_, i64>(0)?;
+                let digest = row.get::<_, Vec<u8>>(1)?;
+                Ok((sequence, digest))
+            },
+        )?;
+        let sequence = u64::try_from(sequence).map_err(|_| BrokerError::NumericOutOfRange)?.saturating_add(1);
+        let previous_event_digest: Digest = previous_event_digest
+            .try_into()
+            .map_err(|_| BrokerError::CorruptState)?;
+        let reason = transition_reason(next);
+        let event_digest = lifecycle_event_digest(request_id, sequence, Some(previous_event_digest), next, reason);
         transaction.execute(
-            "INSERT INTO request_events (request_id, sequence, state)
-             SELECT request_id, COALESCE(MAX(sequence), 0) + 1, ?2
-               FROM request_events
-              WHERE request_id = ?1",
-            params![request_id.as_str(), next.as_db()],
+            "INSERT INTO request_events (request_id, sequence, state, reason, previous_event_digest, event_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                request_id.as_str(),
+                i64::try_from(sequence).map_err(|_| BrokerError::NumericOutOfRange)?,
+                next.as_db(),
+                reason.code(),
+                previous_event_digest.as_slice(),
+                event_digest.as_slice(),
+            ],
         )?;
         transaction.commit()?;
         Ok(next)
@@ -488,6 +520,37 @@ impl BrokerStore {
             )
             .optional()
             .map_err(BrokerError::from)
+    }
+
+    /// Reads the durable event chain for a request. This is intended for the
+    /// future receipt/relay signer, not for a requester-facing RPC response.
+    pub fn events(&self, request_id: &PublicId) -> Result<Vec<LifecycleEvent>, BrokerError> {
+        let mut statement = self.connection.prepare(
+            "SELECT sequence, state, reason, previous_event_digest, event_digest
+             FROM request_events WHERE request_id = ?1 ORDER BY sequence ASC",
+        )?;
+        let rows = statement.query_map([request_id.as_str()], |row| {
+            let sequence = row.get::<_, i64>(0)?;
+            let state = row.get::<_, String>(1)?;
+            let reason = row.get::<_, i64>(2)?;
+            let previous = row.get::<_, Option<Vec<u8>>>(3)?;
+            let digest = row.get::<_, Vec<u8>>(4)?;
+            Ok((sequence, state, reason, previous, digest))
+        })?;
+        rows.map(|row| {
+            let (sequence, state, reason, previous, digest) = row?;
+            let previous_event_digest = previous
+                .map(|value| value.try_into().map_err(|_| BrokerError::CorruptState))
+                .transpose()?;
+            let event_digest = digest.try_into().map_err(|_| BrokerError::CorruptState)?;
+            Ok(LifecycleEvent {
+                sequence: u64::try_from(sequence).map_err(|_| BrokerError::NumericOutOfRange)?,
+                previous_event_digest,
+                state: RequestState::from_db(&state)?,
+                reason: transition_reason_from_code(reason)?,
+                event_digest,
+            })
+        }).collect()
     }
 }
 
@@ -559,6 +622,453 @@ const fn is_base64url(byte: u8) -> bool {
 
 const fn is_package_character(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'.' | b'-')
+}
+
+/// Result produced by the planner before a request can be presented for approval.
+///
+/// The real APT adapter is deliberately not represented here.  It belongs behind
+/// the M4 helper boundary.  This type gives M2 a deterministic, testable seam
+/// without letting a caller supply a plan, version, archive, or APT option.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanOutcome {
+    /// A frozen transition that is safe to bind into a pending request.
+    Pending(FrozenPlan),
+    /// The requested package is already in the desired state.
+    NoChange { reason_code: u16 },
+    /// Planning rejected the typed request without invoking a helper.
+    Invalid { reason_code: u16 },
+}
+
+/// Minimal immutable projection of a frozen plan available before the APT
+/// helper exists.  `manifest_digest` is supplied only by a trusted planner.
+/// The complete v1 `PlanManifest` / `FrozenPlan` schema remains a protocol-crate
+/// gap and must replace this projection before real execution is enabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenPlan {
+    pub package_name: PackageName,
+    pub manifest_digest: Digest,
+    pub plan_digest: Digest,
+    pub action_count: u32,
+}
+
+impl FrozenPlan {
+    /// Constructs a deterministic fake-plan projection for M2 tests.
+    pub fn fake(package_name: PackageName, manifest_digest: Digest, action_count: u32) -> Result<Self, PlannerError> {
+        let view = CborValue::Map(vec![
+            (CborValue::Unsigned(1), CborValue::Text(package_name.as_str().to_owned())),
+            (CborValue::Unsigned(2), CborValue::Bytes(manifest_digest.to_vec())),
+            (CborValue::Unsigned(3), CborValue::Unsigned(u64::from(action_count))),
+        ]);
+        let plan_digest = digest_cbor(Domain::AptPlan, &view).map_err(|_| PlannerError::Canonicalization)?;
+        Ok(Self { package_name, manifest_digest, plan_digest, action_count })
+    }
+}
+
+/// Trusted planner seam. Implementations receive only a validated base package
+/// name and cannot recover any discarded agent arguments.
+pub trait Planner {
+    fn plan(&self, package_name: &PackageName) -> Result<PlanOutcome, PlannerError>;
+}
+
+/// Planner failures are deliberately opaque to the requester-facing API.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum PlannerError {
+    #[error("planner could not produce a deterministic canonical plan")]
+    Canonicalization,
+    #[error("planner is temporarily unavailable")]
+    Unavailable,
+}
+
+/// Deterministic planner used by M2 lifecycle tests. It cannot execute APT,
+/// inspect the host, or manufacture an arbitrary package transition.
+#[derive(Debug, Clone, Default)]
+pub struct FakePlanner {
+    outcomes: BTreeMap<PackageName, PlanOutcome>,
+}
+
+impl FakePlanner {
+    #[must_use]
+    pub fn with_outcomes(outcomes: impl IntoIterator<Item = (PackageName, PlanOutcome)>) -> Self {
+        Self { outcomes: outcomes.into_iter().collect() }
+    }
+}
+
+impl Planner for FakePlanner {
+    fn plan(&self, package_name: &PackageName) -> Result<PlanOutcome, PlannerError> {
+        Ok(self
+            .outcomes
+            .get(package_name)
+            .cloned()
+            .unwrap_or(PlanOutcome::Invalid { reason_code: 1 }))
+    }
+}
+
+/// Reason recorded with a local state transition. Values are stable local audit
+/// codes, not a replacement for the still-unimplemented v1 protocol event map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransitionReason {
+    Created,
+    PlannerPending,
+    PlannerNoChange,
+    PlannerInvalid,
+    Approved,
+    Denied,
+    Expired,
+    Cancelled,
+    GenerationStale,
+    ExecutionStarted,
+    ExecutionSucceeded,
+    ExecutionFailed,
+    RecoveryRequired,
+    ReconciledSucceeded,
+    ReconciledFailed,
+}
+
+impl TransitionReason {
+    const fn code(self) -> u64 {
+        match self {
+            Self::Created => 1,
+            Self::PlannerPending => 2,
+            Self::PlannerNoChange => 3,
+            Self::PlannerInvalid => 4,
+            Self::Approved => 5,
+            Self::Denied => 6,
+            Self::Expired => 7,
+            Self::Cancelled => 8,
+            Self::GenerationStale => 9,
+            Self::ExecutionStarted => 10,
+            Self::ExecutionSucceeded => 11,
+            Self::ExecutionFailed => 12,
+            Self::RecoveryRequired => 13,
+            Self::ReconciledSucceeded => 14,
+            Self::ReconciledFailed => 15,
+        }
+    }
+}
+
+fn transition_reason(state: RequestState) -> TransitionReason {
+    match state {
+        RequestState::Planning => TransitionReason::Created,
+        RequestState::Pending => TransitionReason::PlannerPending,
+        RequestState::NoChange => TransitionReason::PlannerNoChange,
+        RequestState::Invalid => TransitionReason::PlannerInvalid,
+        RequestState::Approved => TransitionReason::Approved,
+        RequestState::Denied => TransitionReason::Denied,
+        RequestState::Expired => TransitionReason::Expired,
+        RequestState::Cancelled => TransitionReason::Cancelled,
+        RequestState::Stale => TransitionReason::GenerationStale,
+        RequestState::Executing => TransitionReason::ExecutionStarted,
+        RequestState::Succeeded => TransitionReason::ExecutionSucceeded,
+        RequestState::Failed => TransitionReason::ExecutionFailed,
+        RequestState::RecoveryRequired => TransitionReason::RecoveryRequired,
+    }
+}
+
+fn transition_reason_from_code(value: i64) -> Result<TransitionReason, BrokerError> {
+    match value {
+        1 => Ok(TransitionReason::Created),
+        2 => Ok(TransitionReason::PlannerPending),
+        3 => Ok(TransitionReason::PlannerNoChange),
+        4 => Ok(TransitionReason::PlannerInvalid),
+        5 => Ok(TransitionReason::Approved),
+        6 => Ok(TransitionReason::Denied),
+        7 => Ok(TransitionReason::Expired),
+        8 => Ok(TransitionReason::Cancelled),
+        9 => Ok(TransitionReason::GenerationStale),
+        10 => Ok(TransitionReason::ExecutionStarted),
+        11 => Ok(TransitionReason::ExecutionSucceeded),
+        12 => Ok(TransitionReason::ExecutionFailed),
+        13 => Ok(TransitionReason::RecoveryRequired),
+        14 => Ok(TransitionReason::ReconciledSucceeded),
+        15 => Ok(TransitionReason::ReconciledFailed),
+        _ => Err(BrokerError::CorruptState),
+    }
+}
+
+/// Append-only local lifecycle event with a deterministic hash-chain link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleEvent {
+    pub sequence: u64,
+    pub previous_event_digest: Option<Digest>,
+    pub state: RequestState,
+    pub reason: TransitionReason,
+    pub event_digest: Digest,
+}
+
+/// Unsigned receipt content prepared by M2. A broker signature cannot be added
+/// yet because `rp-protocol` has no public COSE or Receipt schema interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptDraft {
+    pub receipt_id: PublicId,
+    pub request_id: PublicId,
+    pub request_digest: Digest,
+    pub plan_digest: Option<Digest>,
+    pub terminal_state: RequestState,
+    pub final_event_digest: Digest,
+    pub receipt_digest: Digest,
+}
+
+/// A verifier is the only route by which an assertion reaches M2. The WebAuthn
+/// parser/verifier is intentionally outside this crate; an unverified decision
+/// must never be represented by this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedDecision {
+    pub request_digest: Digest,
+    pub generation: u64,
+    pub decision: Decision,
+    pub assertion_digest: Digest,
+}
+
+/// Deterministic lifecycle authority used by the broker transaction layer.
+/// Calls are intentionally serialized by `BrokerStore`'s `BEGIN IMMEDIATE`
+/// transaction in a production adapter; this value object makes every race
+/// winner and event-chain result independently testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleRecord {
+    pub request_id: PublicId,
+    pub receipt_id: PublicId,
+    pub requested_package: PackageName,
+    pub request_digest: Digest,
+    pub generation: u64,
+    pub deadline_mono_ns: u64,
+    pub state: RequestState,
+    pub plan: Option<FrozenPlan>,
+    pub events: Vec<LifecycleEvent>,
+    pub receipt: Option<ReceiptDraft>,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum LifecycleError {
+    #[error("lifecycle action is not allowed from {state:?}")]
+    InvalidState { state: RequestState },
+    #[error("verified decision does not bind this request")]
+    DecisionContextMismatch,
+    #[error("verified decision was made for stale credential generation")]
+    DecisionGenerationStale,
+    #[error("a terminal state already won the lifecycle race")]
+    AlreadyTerminal,
+    #[error("receipt is available only after a terminal state")]
+    ReceiptNotReady,
+    #[error("planner result does not bind the requested package")]
+    PlannerPackageMismatch,
+}
+
+impl LifecycleRecord {
+    /// Creates the durable in-memory representation immediately after typed
+    /// input was accepted. Both IDs are broker-generated opaque identifiers.
+    #[must_use]
+    pub fn new(
+        request_id: PublicId,
+        receipt_id: PublicId,
+        requested_package: PackageName,
+        request_digest: Digest,
+        generation: u64,
+        deadline_mono_ns: u64,
+    ) -> Self {
+        let mut record = Self {
+            request_id,
+            receipt_id,
+            requested_package,
+            request_digest,
+            generation,
+            deadline_mono_ns,
+            state: RequestState::Planning,
+            plan: None,
+            events: Vec::new(),
+            receipt: None,
+        };
+        record.append(RequestState::Planning, TransitionReason::Created);
+        record
+    }
+
+    /// Applies a trusted planner output. No decision or execution can happen
+    /// while the record remains in `planning`.
+    pub fn apply_plan(&mut self, outcome: PlanOutcome) -> Result<RequestState, LifecycleError> {
+        if self.state != RequestState::Planning {
+            return Err(self.state_error());
+        }
+        match outcome {
+            PlanOutcome::Pending(plan) => {
+                if plan.package_name != self.requested_package {
+                    return Err(LifecycleError::PlannerPackageMismatch);
+                }
+                self.plan = Some(plan);
+                self.winner(RequestState::Pending, TransitionReason::PlannerPending);
+            }
+            PlanOutcome::NoChange { .. } => self.winner(RequestState::NoChange, TransitionReason::PlannerNoChange),
+            PlanOutcome::Invalid { .. } => self.winner(RequestState::Invalid, TransitionReason::PlannerInvalid),
+        }
+        Ok(self.state)
+    }
+
+    /// Accepts exactly one already-verified, context-bound decision. Expiry and
+    /// generation changes are checked before the decision so their durable
+    /// terminal transition wins deterministically.
+    pub fn apply_verified_decision(
+        &mut self,
+        now_mono_ns: u64,
+        active_generation: u64,
+        decision: &VerifiedDecision,
+    ) -> Result<RequestState, LifecycleError> {
+        self.pre_execution_guard(now_mono_ns, active_generation)?;
+        if self.state != RequestState::Pending {
+            return Err(self.state_error());
+        }
+        if decision.request_digest != self.request_digest {
+            return Err(LifecycleError::DecisionContextMismatch);
+        }
+        if decision.generation != self.generation {
+            return Err(LifecycleError::DecisionGenerationStale);
+        }
+        match decision.decision {
+            Decision::Approve => self.winner(RequestState::Approved, TransitionReason::Approved),
+            Decision::Deny => self.winner(RequestState::Denied, TransitionReason::Denied),
+        }
+        Ok(self.state)
+    }
+
+    /// Cancels only before execution. A cancelled request cannot later be
+    /// approved or handed to the helper.
+    pub fn cancel(&mut self, now_mono_ns: u64, active_generation: u64) -> Result<RequestState, LifecycleError> {
+        self.pre_execution_guard(now_mono_ns, active_generation)?;
+        if !matches!(self.state, RequestState::Pending | RequestState::Approved) {
+            return Err(self.state_error());
+        }
+        self.winner(RequestState::Cancelled, TransitionReason::Cancelled);
+        Ok(self.state)
+    }
+
+    /// The sole authorization-to-execution transition. A generation change or
+    /// expiry always wins before this can reach the helper boundary.
+    pub fn begin_execution(&mut self, now_mono_ns: u64, active_generation: u64) -> Result<RequestState, LifecycleError> {
+        self.pre_execution_guard(now_mono_ns, active_generation)?;
+        if self.state != RequestState::Approved {
+            return Err(self.state_error());
+        }
+        self.winner(RequestState::Executing, TransitionReason::ExecutionStarted);
+        Ok(self.state)
+    }
+
+    /// Records a helper-proved outcome. It intentionally has no retry path.
+    pub fn finish_execution(&mut self, succeeded: bool, recovery_required: bool) -> Result<RequestState, LifecycleError> {
+        if self.state != RequestState::Executing {
+            return Err(self.state_error());
+        }
+        match (succeeded, recovery_required) {
+            (true, false) => self.winner(RequestState::Succeeded, TransitionReason::ExecutionSucceeded),
+            (false, false) => self.winner(RequestState::Failed, TransitionReason::ExecutionFailed),
+            (false, true) => self.winner(RequestState::RecoveryRequired, TransitionReason::RecoveryRequired),
+            (true, true) => return Err(LifecycleError::InvalidState { state: self.state }),
+        }
+        Ok(self.state)
+    }
+
+    /// Root-only reconciliation has to prove either result; this method models
+    /// only the state-machine edge and deliberately cannot restart execution.
+    pub fn reconcile(&mut self, succeeded: bool) -> Result<RequestState, LifecycleError> {
+        if self.state != RequestState::RecoveryRequired {
+            return Err(self.state_error());
+        }
+        if succeeded {
+            self.winner(RequestState::Succeeded, TransitionReason::ReconciledSucceeded);
+        } else {
+            self.winner(RequestState::Failed, TransitionReason::ReconciledFailed);
+        }
+        Ok(self.state)
+    }
+
+    fn pre_execution_guard(&mut self, now_mono_ns: u64, active_generation: u64) -> Result<(), LifecycleError> {
+        if self.state.is_terminal() {
+            return Err(LifecycleError::AlreadyTerminal);
+        }
+        if matches!(self.state, RequestState::Pending | RequestState::Approved) && now_mono_ns >= self.deadline_mono_ns {
+            self.winner(RequestState::Expired, TransitionReason::Expired);
+            return Err(LifecycleError::AlreadyTerminal);
+        }
+        if matches!(self.state, RequestState::Pending | RequestState::Approved) && active_generation != self.generation {
+            self.winner(RequestState::Stale, TransitionReason::GenerationStale);
+            return Err(LifecycleError::AlreadyTerminal);
+        }
+        Ok(())
+    }
+
+    fn state_error(&self) -> LifecycleError {
+        if self.state.is_terminal() { LifecycleError::AlreadyTerminal } else { LifecycleError::InvalidState { state: self.state } }
+    }
+
+    fn winner(&mut self, next: RequestState, reason: TransitionReason) {
+        debug_assert!(self.state.permits(next));
+        self.state = next;
+        self.append(next, reason);
+        if next.is_terminal() {
+            self.receipt = Some(self.make_receipt());
+        }
+    }
+
+    fn append(&mut self, state: RequestState, reason: TransitionReason) {
+        let sequence = u64::try_from(self.events.len()).unwrap_or(u64::MAX).saturating_add(1);
+        let previous_event_digest = self.events.last().map(|event| event.event_digest);
+        let event_digest = lifecycle_event_digest(&self.request_id, sequence, previous_event_digest, state, reason);
+        self.events.push(LifecycleEvent { sequence, previous_event_digest, state, reason, event_digest });
+    }
+
+    fn make_receipt(&self) -> ReceiptDraft {
+        let final_event_digest = self.events.last().map_or([0; 32], |event| event.event_digest);
+        let plan_digest = self.plan.as_ref().and_then(|plan| (plan.plan_digest != [0; 32]).then_some(plan.plan_digest));
+        let receipt_digest = receipt_digest(
+            &self.receipt_id,
+            &self.request_id,
+            self.request_digest,
+            plan_digest,
+            self.state,
+            final_event_digest,
+        );
+        ReceiptDraft {
+            receipt_id: self.receipt_id.clone(),
+            request_id: self.request_id.clone(),
+            request_digest: self.request_digest,
+            plan_digest,
+            terminal_state: self.state,
+            final_event_digest,
+            receipt_digest,
+        }
+    }
+}
+
+fn lifecycle_event_digest(
+    request_id: &PublicId,
+    sequence: u64,
+    previous_event_digest: Option<Digest>,
+    state: RequestState,
+    reason: TransitionReason,
+) -> Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rootpermit/v1/local-lifecycle-event\0");
+    hasher.update(request_id.as_str().as_bytes());
+    hasher.update(sequence.to_be_bytes());
+    hasher.update(previous_event_digest.unwrap_or([0; 32]));
+    hasher.update(state.as_db().as_bytes());
+    hasher.update(reason.code().to_be_bytes());
+    hasher.finalize().into()
+}
+
+fn receipt_digest(
+    receipt_id: &PublicId,
+    request_id: &PublicId,
+    request_digest: Digest,
+    plan_digest: Option<Digest>,
+    state: RequestState,
+    final_event_digest: Digest,
+) -> Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rootpermit/v1/local-receipt-draft\0");
+    hasher.update(receipt_id.as_str().as_bytes());
+    hasher.update(request_id.as_str().as_bytes());
+    hasher.update(request_digest);
+    hasher.update(plan_digest.unwrap_or([0; 32]));
+    hasher.update(state.as_db().as_bytes());
+    hasher.update(final_event_digest);
+    hasher.finalize().into()
 }
 
 #[cfg(test)]
@@ -668,6 +1178,22 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_transition_persists_a_contiguous_hash_chain_in_the_same_transaction() {
+        let mut store = BrokerStore::in_memory().unwrap();
+        let initial = request(REQUEST_A, 1000, KEY_A, "ffmpeg");
+        store.submit(initial.clone(), &allow("ffmpeg")).unwrap();
+        store.transition(&initial.request_id, RequestState::Planning, RequestState::Pending).unwrap();
+        store.transition(&initial.request_id, RequestState::Pending, RequestState::Denied).unwrap();
+        let events = store.events(&initial.request_id).unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].sequence, 1);
+        assert_eq!(events[0].previous_event_digest, None);
+        assert_eq!(events[1].previous_event_digest, Some(events[0].event_digest));
+        assert_eq!(events[2].previous_event_digest, Some(events[1].event_digest));
+        assert_eq!(events[2].reason, TransitionReason::Denied);
+    }
+
+    #[test]
     fn all_documented_lifecycle_edges_are_accepted_and_undocumented_edges_rejected() {
         let accepted = [
             (RequestState::Planning, RequestState::Pending),
@@ -692,5 +1218,82 @@ mod tests {
         assert!(!RequestState::Planning.permits(RequestState::Succeeded));
         assert!(!RequestState::Approved.permits(RequestState::Denied));
         assert!(!RequestState::Succeeded.permits(RequestState::Failed));
+    }
+
+    fn lifecycle() -> LifecycleRecord {
+        LifecycleRecord::new(
+            PublicId::parse(REQUEST_A).unwrap(),
+            PublicId::parse(REQUEST_B).unwrap(),
+            PackageName::parse("ffmpeg").unwrap(),
+            [9; 32],
+            3,
+            100,
+        )
+    }
+
+    fn pending_plan() -> FrozenPlan {
+        FrozenPlan::fake(PackageName::parse("ffmpeg").unwrap(), [7; 32], 2).unwrap()
+    }
+
+    #[test]
+    fn fake_planner_is_deterministic_and_cannot_change_the_requested_package() {
+        let plan = pending_plan();
+        let planner = FakePlanner::with_outcomes([(PackageName::parse("ffmpeg").unwrap(), PlanOutcome::Pending(plan.clone()))]);
+        assert_eq!(planner.plan(&PackageName::parse("ffmpeg").unwrap()).unwrap(), PlanOutcome::Pending(plan));
+        assert_eq!(
+            planner.plan(&PackageName::parse("curl").unwrap()).unwrap(),
+            PlanOutcome::Invalid { reason_code: 1 }
+        );
+
+        let mut record = lifecycle();
+        let changed = FrozenPlan::fake(PackageName::parse("curl").unwrap(), [7; 32], 1).unwrap();
+        assert_eq!(record.apply_plan(PlanOutcome::Pending(changed)), Err(LifecycleError::PlannerPackageMismatch));
+        assert_eq!(record.state, RequestState::Planning);
+    }
+
+    #[test]
+    fn decision_expiry_cancel_and_generation_have_one_durable_winner() {
+        let mut approved = lifecycle();
+        approved.apply_plan(PlanOutcome::Pending(pending_plan())).unwrap();
+        let proof = VerifiedDecision {
+            request_digest: [9; 32], generation: 3, decision: Decision::Approve, assertion_digest: [4; 32],
+        };
+        assert_eq!(approved.apply_verified_decision(99, 3, &proof).unwrap(), RequestState::Approved);
+        assert_eq!(approved.begin_execution(99, 4), Err(LifecycleError::AlreadyTerminal));
+        assert_eq!(approved.state, RequestState::Stale);
+        assert_eq!(approved.cancel(99, 3), Err(LifecycleError::AlreadyTerminal));
+
+        let mut expired = lifecycle();
+        expired.apply_plan(PlanOutcome::Pending(pending_plan())).unwrap();
+        assert_eq!(expired.cancel(100, 3), Err(LifecycleError::AlreadyTerminal));
+        assert_eq!(expired.state, RequestState::Expired);
+
+        let mut denied = lifecycle();
+        denied.apply_plan(PlanOutcome::Pending(pending_plan())).unwrap();
+        let deny = VerifiedDecision {
+            request_digest: [9; 32], generation: 3, decision: Decision::Deny, assertion_digest: [5; 32],
+        };
+        assert_eq!(denied.apply_verified_decision(99, 3, &deny).unwrap(), RequestState::Denied);
+        assert_eq!(denied.apply_verified_decision(99, 3, &proof), Err(LifecycleError::AlreadyTerminal));
+    }
+
+    #[test]
+    fn terminal_receipt_draft_commits_to_the_event_chain_without_claiming_a_signature() {
+        let mut record = lifecycle();
+        record.apply_plan(PlanOutcome::Pending(pending_plan())).unwrap();
+        let proof = VerifiedDecision {
+            request_digest: [9; 32], generation: 3, decision: Decision::Approve, assertion_digest: [4; 32],
+        };
+        record.apply_verified_decision(99, 3, &proof).unwrap();
+        record.begin_execution(99, 3).unwrap();
+        record.finish_execution(false, true).unwrap();
+        assert_eq!(record.receipt, None);
+        record.reconcile(false).unwrap();
+        let receipt = record.receipt.clone().unwrap();
+        assert_eq!(receipt.terminal_state, RequestState::Failed);
+        assert_eq!(receipt.plan_digest, Some(pending_plan().plan_digest));
+        assert_eq!(receipt.final_event_digest, record.events.last().unwrap().event_digest);
+        assert!(record.events.windows(2).all(|events| events[1].previous_event_digest == Some(events[0].event_digest)));
+        assert_ne!(receipt.receipt_digest, [0; 32]);
     }
 }

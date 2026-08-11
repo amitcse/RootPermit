@@ -194,9 +194,9 @@ fn is_binary_package_name(value: &str) -> bool {
 
 fn is_operation_key(value: &str) -> bool {
     let bytes = value.as_bytes();
-    (1..=128).contains(&bytes.len())
+    (16..=128).contains(&bytes.len())
         && bytes.iter().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b'.')
+            byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_')
         })
 }
 
@@ -247,7 +247,7 @@ mod tests {
                 "install",
                 value,
                 "--operation-key",
-                "safe-key",
+                "safe-key-12345678",
             ]));
             assert_eq!(result, Err(ParseError::InvalidPackageName), "{value}");
         }
@@ -263,7 +263,7 @@ mod tests {
                 "--note",
                 "x",
                 "--operation-key",
-                "safe-key",
+                "safe-key-12345678",
             ])),
             Err(ParseError::UnexpectedArgument)
         );
@@ -273,7 +273,7 @@ mod tests {
                 "install",
                 "ffmpeg",
                 "--operation-key",
-                "safe-key",
+                "safe-key-12345678",
                 "--apt-option",
                 "x",
             ])),
@@ -285,12 +285,25 @@ mod tests {
                 "install",
                 "ffmpeg",
                 "--operation-key",
-                "safe-key",
+                "safe-key-12345678",
                 "--note",
                 &"x".repeat(513),
             ])),
             Err(ParseError::InvalidNote)
         );
+    }
+
+    #[test]
+    fn operation_keys_match_the_broker_opaque_key_contract() {
+        for key in ["short-key", "contains.dot-123456", "contains/slash-1234"] {
+            assert_eq!(
+                parse_package_install(&arguments(&[
+                    "package", "install", "ffmpeg", "--operation-key", key,
+                ])),
+                Err(ParseError::InvalidOperationKey),
+                "{key}"
+            );
+        }
     }
 
     #[test]
@@ -301,7 +314,7 @@ mod tests {
             "install",
             secret_like_input,
             "--operation-key",
-            "safe-key",
+                "safe-key-12345678",
         ]));
         assert_eq!(parsed, Err(ParseError::InvalidPackageName));
 

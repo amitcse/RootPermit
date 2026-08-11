@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rp-protocol = { path = "../rp-protocol" }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 sha2 = "0.10.9"
 thiserror = "2.0.12"
