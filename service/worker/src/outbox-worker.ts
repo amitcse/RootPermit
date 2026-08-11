@@ -24,6 +24,7 @@ interface ClaimedOutboxRow {
   relation_id: string;
   event_type: string;
   payload_digest: Uint8Array;
+  lease_generation: number;
 }
 
 const claimedOutboxItemBrand: unique symbol = Symbol("ClaimedOutboxItem");
@@ -35,6 +36,8 @@ export interface ClaimedOutboxItem {
   readonly relationId: string;
   readonly eventType: string;
   readonly payloadDigest: Uint8Array;
+  /** Prevents a worker whose lease expired from deleting a newer worker's row. */
+  readonly leaseGeneration: number;
   readonly [claimedOutboxItemBrand]: true;
 }
 
@@ -70,6 +73,7 @@ function claimedItem(row: ClaimedOutboxRow): ClaimedOutboxItem {
     relationId: requireUuid(row.relation_id, "relation id"),
     eventType: requireLabel(row.event_type, "event type"),
     payloadDigest: row.payload_digest,
+    leaseGeneration: requireLeaseGeneration(row.lease_generation),
     [claimedOutboxItemBrand]: true as const,
   });
 }
@@ -92,7 +96,7 @@ export class TransactionalOutboxWorker {
     }
 
     const claim = await this.database.query<ClaimedOutboxRow>(
-      `SELECT id, tenant_id, relation_type, relation_id, event_type, payload_digest
+      `SELECT id, tenant_id, relation_type, relation_id, event_type, payload_digest, lease_generation
          FROM rootpermit.claim_outbox($1)`,
       [limit],
     );
@@ -102,8 +106,9 @@ export class TransactionalOutboxWorker {
       const item = claimedItem(row);
       try {
         await delivery.deliver(item);
-        await this.complete(item);
-        completed.push(item.id);
+        if (await this.complete(item)) {
+          completed.push(item.id);
+        }
       } catch (error) {
         await this.reschedule(item, retryDelay(error));
       }
@@ -111,8 +116,8 @@ export class TransactionalOutboxWorker {
     return completed;
   }
 
-  private async complete(item: ClaimedOutboxItem): Promise<void> {
-    await this.withClaimTenant(item, async (transaction) => {
+  private async complete(item: ClaimedOutboxItem): Promise<boolean> {
+    return this.withClaimTenant(item, async (transaction) => {
       const result = await transaction.query<{ id: string }>(
         `DELETE FROM outbox
           WHERE tenant_id = rootpermit.current_tenant_id()
@@ -120,32 +125,30 @@ export class TransactionalOutboxWorker {
             AND relation_type = $2
             AND relation_id = $3
             AND event_type = $4
+            AND lease_generation = $5
           RETURNING id`,
-        [item.id, item.relationType, item.relationId, item.eventType],
+        [item.id, item.relationType, item.relationId, item.eventType, item.leaseGeneration],
       );
-      if (result.rows.length !== 1) {
-        throw new Error("outbox completion lost its tenant/relation lease");
-      }
+      return result.rows.length === 1;
     });
   }
 
-  private async reschedule(item: ClaimedOutboxItem, retryAfterMs: number): Promise<void> {
-    await this.withClaimTenant(item, async (transaction) => {
+  private async reschedule(item: ClaimedOutboxItem, retryAfterMs: number): Promise<boolean> {
+    return this.withClaimTenant(item, async (transaction) => {
       const result = await transaction.query<{ id: string }>(
         `UPDATE outbox
             SET attempts = attempts + 1,
-                visible_after = now() + ($5::bigint * interval '1 millisecond')
+                visible_after = now() + ($6::bigint * interval '1 millisecond')
           WHERE tenant_id = rootpermit.current_tenant_id()
             AND id = $1
             AND relation_type = $2
             AND relation_id = $3
             AND event_type = $4
+            AND lease_generation = $5
           RETURNING id`,
-        [item.id, item.relationType, item.relationId, item.eventType, retryAfterMs],
+        [item.id, item.relationType, item.relationId, item.eventType, item.leaseGeneration, retryAfterMs],
       );
-      if (result.rows.length !== 1) {
-        throw new Error("outbox retry lost its tenant/relation lease");
-      }
+      return result.rows.length === 1;
     });
   }
 
@@ -161,6 +164,13 @@ export class TransactionalOutboxWorker {
       return work(transaction);
     });
   }
+}
+
+function requireLeaseGeneration(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error("outbox lease generation must be a positive safe integer");
+  }
+  return value;
 }
 
 function retryDelay(error: unknown): number {

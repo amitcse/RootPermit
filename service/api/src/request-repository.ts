@@ -53,7 +53,7 @@ export class RequestRepository {
         `SELECT request_envelopes.public_id,
                 devices.public_id AS device_public_id,
                 latest_projection.state AS projection_state,
-                latest_projection.frozen_gap,
+                COALESCE(projection_sync_states.frozen_gap, latest_projection.frozen_gap, false) AS frozen_gap,
                 request_envelopes.terminal,
                 request_envelopes.expires_at
            FROM request_envelopes
@@ -68,6 +68,9 @@ export class RequestRepository {
               ORDER BY lifecycle_projections.broker_sequence DESC
               LIMIT 1
            ) AS latest_projection ON true
+      LEFT JOIN projection_sync_states
+             ON projection_sync_states.tenant_id = request_envelopes.tenant_id
+            AND projection_sync_states.request_envelope_id = request_envelopes.id
           WHERE request_envelopes.tenant_id = rootpermit.current_tenant_id()
             AND request_envelopes.public_id = $1
           LIMIT 1`,
@@ -92,7 +95,7 @@ export class RequestRepository {
         `SELECT request_envelopes.public_id,
                 devices.public_id AS device_public_id,
                 latest_projection.state AS projection_state,
-                latest_projection.frozen_gap,
+                COALESCE(projection_sync_states.frozen_gap, latest_projection.frozen_gap, false) AS frozen_gap,
                 request_envelopes.terminal,
                 request_envelopes.expires_at
            FROM request_envelopes
@@ -107,6 +110,9 @@ export class RequestRepository {
               ORDER BY lifecycle_projections.broker_sequence DESC
               LIMIT 1
            ) AS latest_projection ON true
+      LEFT JOIN projection_sync_states
+             ON projection_sync_states.tenant_id = request_envelopes.tenant_id
+            AND projection_sync_states.request_envelope_id = request_envelopes.id
           WHERE request_envelopes.tenant_id = rootpermit.current_tenant_id()
             AND devices.public_id = $1
           ORDER BY request_envelopes.created_at DESC

@@ -43,6 +43,46 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm ci
       - run: npm run check
+      - run: node --test service/migrations/test/*.test.mjs
+
+  postgres-tenant-isolation:
+    name: PostgreSQL tenant-isolation migration gate
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: rootpermit_ci
+          POSTGRES_USER: rootpermit_ci_owner
+          POSTGRES_PASSWORD: rootpermit_ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rootpermit_ci_owner -d rootpermit_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGDATABASE: rootpermit_ci
+      PGUSER: rootpermit_ci_owner
+      PGPASSWORD: rootpermit_ci_password
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client
+      - name: Apply hosted schema migrations
+        run: |
+          for migration in service/migrations/[0-9]*.sql; do
+            psql --no-psqlrc --set ON_ERROR_STOP=1 --file "$migration"
+          done
+      - name: Prove live tenant RLS and transaction context reset
+        run: |
+          psql --no-psqlrc --set ON_ERROR_STOP=1 \
+            --file service/migrations/test/live-tenant-isolation.sql
 
   fixture-contract:
     name: Fixture contract

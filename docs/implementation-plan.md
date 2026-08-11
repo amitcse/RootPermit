@@ -56,6 +56,21 @@ work. They are blocking security claims, not implementation details.
 - M5: two-tenant property/integration tests cover API, worker, polling,
   notification, export, backup and cache substitution paths.
 
+## Implementation status (2026-08-12)
+
+| Milestone | Implemented in this repository | Evidence still required before the milestone can be claimed complete |
+|---|---|---|
+| M1 protocol | Strict CBOR schema/digest primitives and a positive/negative vector harness. | Pinned Rust toolchain execution, COSE/WebAuthn implementation, and multi-language vector consumers. |
+| M2 broker | Typed package intake, idempotency, one-active-request SQLite invariant, deterministic fake planning, lifecycle CAS/race engine, hash-chained event drafts, socket peer-identity contract, and relay simulation. | Rust format/lint/unit execution; COSE-signed receipt integration; kernel socket integration tests. |
+| M3 hosted control plane | Tenant/account-scoped repositories, approval ceremony boundary, decision submission model, opaque relay projection, duplicate/reorder/gap freeze/resync behavior, and tenant-scoped outbox propagation. | Root-started pairing and pinned WebAuthn verifier integration against the shared protocol corpus. |
+| M4 APT helper | Fail-closed argv/environment/FD handoff, immutable content-addressed object checks, canonical manifest parsing, and action-graph normalization. | `libapt-pkg` sealed simulation/execution, locks, journal/crash recovery, and the pinned Ubuntu adversarial VM matrix. |
+| M5 tenant isolation | Transaction-local tenant scope, repository guards, tenant-derived cache/polling routes, lease-safe outbox workers, migration/RLS contracts, and local substitution tests. | Live PostgreSQL RLS mutation tests and the concurrent two-tenant adversarial suite. |
+
+The helper deliberately has no APT execution path until M4 evidence passes. The
+hosted service deliberately remains a projection and coordination layer; it
+cannot create broker authority or turn an account session into approval
+authority.
+
 ## Current environment limitation
 
 This workspace currently lacks Rust/Cargo, CMake, PostgreSQL, containers and

@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "typecheck": "node --experimental-strip-types --check src/tenant-context.ts && node --experimental-strip-types --check src/request-repository.ts && node --experimental-strip-types --check test/request-repository.test.ts",
+    "typecheck": "node --experimental-strip-types --check src/tenant-context.ts && node --experimental-strip-types --check src/request-repository.ts && node --experimental-strip-types --check src/projection-repository.ts && node --experimental-strip-types --check src/approval-boundary.ts && node --experimental-strip-types --check src/tenant-routing.ts && node --experimental-strip-types --check test/request-repository.test.ts && node --experimental-strip-types --check test/projection-repository.test.ts && node --experimental-strip-types --check test/approval-boundary.test.ts && node --experimental-strip-types --check test/decision-submission.test.ts && node --experimental-strip-types --check test/tenant-routing.test.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts"
   }
 }

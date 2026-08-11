@@ -1,0 +1,8 @@
+:root { color: #1e2429; background: #f4f5f6; font-family: system-ui, sans-serif; }
+.approval { box-sizing: border-box; max-width: 42rem; margin: 2rem auto; padding: 1.25rem; background: #fff; border: 1px solid #a8afb4; }
+.eyebrow, .code { color: #59636b; font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; }
+h1 { font-size: 1.55rem; line-height: 1.2; } h2 { font-size: 1rem; }
+.consequences { border: 1px solid #53616b; padding: 1rem; } dl { margin: 0; } dt { color: #4c5962; margin-top: .75rem; } dd { margin: .15rem 0 0; } ul { margin: 0; padding-left: 1.1rem; }
+.agent-note { border: 1px dashed #5b6267; margin-top: 1rem; padding: .75rem; background: #fbfbfb; } .agent-note h2 { margin: 0 0 .5rem; }
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; margin-top: 1.25rem; } button { min-height: 3rem; border: 2px solid #26343d; background: #fff; font: inherit; font-weight: 700; } button[data-decision="approve"] { color: #fff; background: #26343d; }
+code { word-break: break-all; } .blocked { border-color: #805d28; }

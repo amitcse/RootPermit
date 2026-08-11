@@ -29,6 +29,31 @@ always exits without installing a package.  Do not use it for machine setup,
 and do not add a convenience CLI, package name, path, environment variable,
 or network fallback to it.
 
+## Live PostgreSQL migration gate
+
+CI starts an ephemeral PostgreSQL 16 database, applies every file in
+`service/migrations/`, and runs
+`service/migrations/test/live-tenant-isolation.sql`.  The test uses a
+non-owner, non-superuser role to prove that catalog RLS/`FORCE ROW LEVEL
+SECURITY` protection blocks a foreign read and write, and that the
+transaction-local `app.tenant_id` setting is cleared after commit.
+
+To run the same migration-level boundary test locally, point `psql` at a
+disposable PostgreSQL database as its database owner:
+
+```sh
+for migration in service/migrations/[0-9]*.sql; do
+  psql --no-psqlrc --set ON_ERROR_STOP=1 --file "$migration"
+done
+psql --no-psqlrc --set ON_ERROR_STOP=1 \
+  --file service/migrations/test/live-tenant-isolation.sql
+```
+
+This is only database-policy evidence. It does **not** prove API/repository,
+worker/outbox, cache, notification, export, polling/WebSocket, logging, or
+support-path isolation; those remain required M5 integration work and must
+not be represented as complete merely because this migration gate passes.
+
 ## Review rules
 
 Every pull request must have passing relevant CI lanes and a clear scoped

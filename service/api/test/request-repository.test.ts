@@ -42,7 +42,7 @@ class RecordingDatabase {
 test("repository sets a transaction-local server-derived tenant before lookup", async () => {
   const rawDatabase = new RecordingDatabase();
   const repository = new RequestRepository(new TenantScopedDatabase(rawDatabase));
-  const scope = tenantScopeFromVerifiedSession({ tenantId: TENANT_A, accountId: "account-from-session" });
+  const scope = tenantScopeFromVerifiedSession({ tenantId: TENANT_A, accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
 
   const result = await repository.getByPublicId(scope, REQUEST_A);
 
@@ -59,7 +59,7 @@ test("repository sets a transaction-local server-derived tenant before lookup", 
 test("repository rejects invalid public IDs and bounded-list violations before querying", async () => {
   const rawDatabase = new RecordingDatabase();
   const repository = new RequestRepository(new TenantScopedDatabase(rawDatabase));
-  const scope = tenantScopeFromVerifiedSession({ tenantId: TENANT_A, accountId: "account-from-session" });
+  const scope = tenantScopeFromVerifiedSession({ tenantId: TENANT_A, accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
 
   await assert.rejects(repository.getByPublicId(scope, "tenant-a-request"), /16-byte base64url/);
   await assert.rejects(repository.listForDevice(scope, DEVICE_A, 101), /1 through 100/);

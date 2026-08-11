@@ -39,7 +39,8 @@ RETURNS TABLE (
   relation_type text,
   relation_id uuid,
   event_type text,
-  payload_digest bytea
+  payload_digest bytea,
+  lease_generation bigint
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -74,6 +75,7 @@ BEGIN
                outbox.relation_id,
                outbox.event_type,
                outbox.payload_digest,
+               outbox.lease_generation,
                outbox.visible_after,
                outbox.created_at
   )
@@ -82,7 +84,8 @@ BEGIN
          claimed.relation_type,
          claimed.relation_id,
          claimed.event_type,
-         claimed.payload_digest
+         claimed.payload_digest,
+         claimed.lease_generation
     FROM claimed
    ORDER BY claimed.visible_after, claimed.created_at, claimed.id;
 END

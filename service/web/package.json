@@ -1,0 +1,10 @@
+{
+  "name": "@rootpermit/service-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "node --experimental-strip-types -e \"Promise.all([import('./src/verified-envelope.ts'), import('./src/approval-page.ts'), import('./src/webauthn-ceremony.ts'), import('./src/render-html.ts')])\"",
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  }
+}

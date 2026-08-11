@@ -19,6 +19,8 @@ const tenantScopeBrand: unique symbol = Symbol("TenantScope");
 /** Opaque capability created only from an already verified account session. */
 export interface TenantScope {
   readonly tenantId: string;
+  /** The authenticated account; used only for account-owned resources. */
+  readonly accountId: string;
   readonly [tenantScopeBrand]: true;
 }
 
@@ -44,6 +46,7 @@ function requireUuid(value: string, field: string): string {
 export function tenantScopeFromVerifiedSession(session: VerifiedAccountSession): TenantScope {
   return Object.freeze({
     tenantId: requireUuid(session.tenantId, "tenant id"),
+    accountId: requireUuid(session.accountId, "account id"),
     [tenantScopeBrand]: true as const,
   });
 }

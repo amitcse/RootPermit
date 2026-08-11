@@ -55,6 +55,7 @@ function claimedRow(id: string, tenantId: string, relationId: string) {
     relation_id: relationId,
     event_type: "decision_ready",
     payload_digest: new Uint8Array(32),
+    lease_generation: 1,
   };
 }
 
@@ -74,7 +75,7 @@ test("completion retains the exact claimed tenant and relation tuple", async () 
   const completion = database.statements.find((statement) => statement.sql.includes("DELETE FROM outbox"));
   assert.deepEqual(context?.parameters, [TENANT_A]);
   assert.match(completion?.sql ?? "", /tenant_id = rootpermit\.current_tenant_id\(\)/);
-  assert.deepEqual(completion?.parameters, [OUTBOX_A, "request_envelope", RELATION_A, "decision_ready"]);
+  assert.deepEqual(completion?.parameters, [OUTBOX_A, "request_envelope", RELATION_A, "decision_ready", 1]);
 });
 
 test("each claimed event re-establishes its own tenant; no tenant is inherited across rows", async () => {
@@ -92,8 +93,8 @@ test("each claimed event re-establishes its own tenant; no tenant is inherited a
     .map((statement) => statement.parameters?.[0]);
   const deletes = database.statements.filter((statement) => statement.sql.includes("DELETE FROM outbox"));
   assert.deepEqual(contexts, [TENANT_A, TENANT_B]);
-  assert.deepEqual(deletes[0]?.parameters, [OUTBOX_A, "request_envelope", RELATION_A, "decision_ready"]);
-  assert.deepEqual(deletes[1]?.parameters, [OUTBOX_B, "request_envelope", RELATION_B, "decision_ready"]);
+  assert.deepEqual(deletes[0]?.parameters, [OUTBOX_A, "request_envelope", RELATION_A, "decision_ready", 1]);
+  assert.deepEqual(deletes[1]?.parameters, [OUTBOX_B, "request_envelope", RELATION_B, "decision_ready", 1]);
 });
 
 test("delivery failure is rescheduled under the original tenant and relation tuple", async () => {
@@ -108,7 +109,19 @@ test("delivery failure is rescheduled under the original tenant and relation tup
   assert.deepEqual(completed, []);
   const retry = database.statements.find((statement) => statement.sql.includes("UPDATE outbox"));
   assert.match(retry?.sql ?? "", /tenant_id = rootpermit\.current_tenant_id\(\)/);
-  assert.deepEqual(retry?.parameters, [OUTBOX_A, "request_envelope", RELATION_A, "decision_ready", 1_000]);
+  assert.deepEqual(retry?.parameters, [OUTBOX_A, "request_envelope", RELATION_A, "decision_ready", 1, 1_000]);
+});
+
+test("a worker whose lease was superseded cannot delete or reschedule a newer claim", async () => {
+  const database = new RecordingDatabase();
+  database.rows = [claimedRow(OUTBOX_A, TENANT_A, RELATION_A)];
+  database.deleteRows = 0;
+  const worker = new TransactionalOutboxWorker(database);
+
+  assert.deepEqual(await worker.runOnce(1, { deliver: async () => undefined }), []);
+  const completion = database.statements.find((statement) => statement.sql.includes("DELETE FROM outbox"));
+  assert.match(completion?.sql ?? "", /lease_generation = \$5/);
+  assert.deepEqual(completion?.parameters?.at(-1), 1);
 });
 
 test("invalid claimed tenant or relation data fails before any delivery", async () => {
@@ -119,4 +132,11 @@ test("invalid claimed tenant or relation data fails before any delivery", async 
 
   await assert.rejects(worker.runOnce(1, { deliver: async () => { deliveries += 1; } }), /outbox tenant id/);
   assert.equal(deliveries, 0);
+});
+
+test("an outbox row without a positive lease generation cannot be delivered", async () => {
+  const database = new RecordingDatabase();
+  database.rows = [{ ...claimedRow(OUTBOX_A, TENANT_A, RELATION_A), lease_generation: 0 }];
+  const worker = new TransactionalOutboxWorker(database);
+  await assert.rejects(worker.runOnce(1, { deliver: async () => undefined }), /lease generation/);
 });
