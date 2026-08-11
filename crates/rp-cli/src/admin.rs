@@ -1,9 +1,13 @@
-//! Unprivileged requester CLI entry point.
+//! Root administration command boundary entry point.
+//!
+//! This binary is deliberately inert until the broker RPC layer can obtain the
+//! kernel peer identity. It neither checks a mutable environment variable nor
+//! treats local command execution as proof of root authority.
 
 use std::ffi::OsString;
 
 use rp_cli::{
-    broker_unavailable_json, invalid_arguments_json, parse_error_json, parse_package_install,
+    admin_unavailable_json, invalid_arguments_json, parse_admin_command, parse_error_json,
 };
 
 fn main() {
@@ -15,8 +19,8 @@ fn main() {
         }
     };
 
-    match parse_package_install(&arguments) {
-        Ok(_) => println!("{}", broker_unavailable_json()),
+    match parse_admin_command(&arguments) {
+        Ok(_) => println!("{}", admin_unavailable_json()),
         Err(error) => println!("{}", parse_error_json(error)),
     }
 }

@@ -10,5 +10,9 @@ publish = false
 name = "rootpermit"
 path = "src/main.rs"
 
+[[bin]]
+name = "rootpermit-admin"
+path = "src/admin.rs"
+
 [lints]
 workspace = true
