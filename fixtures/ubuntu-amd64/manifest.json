@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "fixture_id": "ubuntu-amd64-m4-contract",
+  "status": "contract-only",
+  "platform": {
+    "os": "Ubuntu Server",
+    "release": "26.04 LTS",
+    "architecture": "amd64"
+  },
+  "purpose": "Contract for the Ubuntu AMD64 sealed-plan evidence fixture; not runnable until M4 inputs are pinned."
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "fixture_id": "rpi-arm64-m4-contract",
+  "status": "contract-only",
+  "platform": {
+    "os": "Raspberry Pi OS Lite",
+    "release": "Debian 13",
+    "architecture": "arm64"
+  },
+  "purpose": "Contract for the Raspberry Pi ARM64 portability fixture; not runnable until M7 inputs are pinned."
+}

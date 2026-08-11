@@ -1,0 +1,22 @@
+name: Release provenance placeholder
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record non-release provenance placeholder
+        run: |
+          mkdir -p artifacts
+          printf '%s\n' 'M0 placeholder: no release artifact or authorization claim.' > artifacts/PROVENANCE-PLACEHOLDER.txt
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/PROVENANCE-PLACEHOLDER.txt

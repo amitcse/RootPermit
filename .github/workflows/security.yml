@@ -1,0 +1,59 @@
+name: Security baseline
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+
+  dependencies:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89.0
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit locked Rust dependencies
+        run: cargo audit --deny warnings
+      - name: Enforce Rust license and source policy
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check licenses bans sources
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
+
+  sbom:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: rootpermit.spdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rootpermit-sbom
+          path: rootpermit.spdx.json
+          if-no-files-found: error

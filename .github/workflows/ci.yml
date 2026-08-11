@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust format, lint, and tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89.0
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  helper-contract:
+    name: APT helper startup-contract harness
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S helper/apt-helper -B build/apt-helper -DBUILD_TESTING=ON
+      - run: cmake --build build/apt-helper --parallel
+      - run: ctest --test-dir build/apt-helper --output-on-failure
+
+  node:
+    name: TypeScript workspace checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run check
+
+  fixture-contract:
+    name: Fixture contract
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert only declared contract manifests exist in M0
+        run: |
+          test "$(find fixtures -name manifest.json -type f | wc -l)" -eq 2
+          grep -R '"status": "contract-only"' fixtures/*/manifest.json

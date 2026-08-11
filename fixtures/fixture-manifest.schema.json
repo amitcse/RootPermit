@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rootpermit.dev/schemas/fixture-manifest-v1.json",
+  "title": "RootPermit APT fixture manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "fixture_id", "status", "platform", "purpose"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "fixture_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$" },
+    "status": { "enum": ["contract-only", "ready"] },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "release", "architecture"],
+      "properties": {
+        "os": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "release": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "architecture": { "enum": ["amd64", "arm64"] }
+      }
+    },
+    "purpose": { "type": "string", "minLength": 1, "maxLength": 240 },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["locator", "sha256"],
+      "properties": {
+        "locator": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "sealed_inputs": { "type": "object" },
+    "evidence_bundle": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "contract-only" } } },
+      "then": {
+        "not": { "anyOf": [ { "required": ["image"] }, { "required": ["sealed_inputs"] }, { "required": ["evidence_bundle"] } ] }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "ready" } } },
+      "then": { "required": ["image", "sealed_inputs", "evidence_bundle"] }
+    }
+  ]
+}
