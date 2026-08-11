@@ -10,8 +10,8 @@ option(RP_APT_HELPER_REQUIRE_LIBAPT
 set(RP_APT_HELPER_LIBAPT_VERSION "2.9" CACHE STRING
   "Minimum libapt-pkg major.minor declaration for the Ubuntu reference image")
 
+find_path(RP_APT_PKG_INCLUDE_DIR apt-pkg/apt-pkgconfig.h)
 if(RP_APT_HELPER_REQUIRE_LIBAPT)
-  find_path(RP_APT_PKG_INCLUDE_DIR apt-pkg/apt-pkgconfig.h)
   if(NOT RP_APT_PKG_INCLUDE_DIR)
     message(FATAL_ERROR
       "libapt-pkg-dev is required when RP_APT_HELPER_REQUIRE_LIBAPT=ON")
@@ -26,6 +26,12 @@ add_library(rootpermit_apt_helper_contract STATIC
   src/startup_contract.cpp
 )
 target_include_directories(rootpermit_apt_helper_contract PUBLIC include)
+if(RP_APT_PKG_INCLUDE_DIR)
+  # Discovery records a build capability only. The current helper boundary
+  # intentionally does not include or link libapt-pkg until M4 evidence exists.
+  target_compile_definitions(rootpermit_apt_helper_contract PUBLIC
+    RP_APT_HELPER_HAS_LIBAPT_PKG=1)
+endif()
 target_compile_options(rootpermit_apt_helper_contract PRIVATE
   -Wall -Wextra -Wpedantic -Werror)
 
