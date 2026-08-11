@@ -1,0 +1,10 @@
+{
+  "name": "@rootpermit/service-api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "node --experimental-strip-types --check src/tenant-context.ts && node --experimental-strip-types --check src/request-repository.ts && node --experimental-strip-types --check test/request-repository.test.ts",
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  }
+}
