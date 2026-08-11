@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "vectors": [
+    { "name": "non-minimal-uint", "target": "cbor", "cbor_hex": "1801", "error": "non_canonical_integer" },
+    { "name": "indefinite-byte-string", "target": "cbor", "cbor_hex": "5fff", "error": "indefinite_length" },
+    { "name": "duplicate-map-key", "target": "cbor", "cbor_hex": "a201f601f6", "error": "non_canonical_map_order" },
+    { "name": "unsorted-map-key", "target": "cbor", "cbor_hex": "a201f600f6", "error": "non_canonical_map_order" },
+    { "name": "trailing-value", "target": "cbor", "cbor_hex": "f6f6", "error": "trailing_bytes" },
+    {
+      "name": "request-unknown-field",
+      "target": "Request",
+      "cbor_hex": "b3010102500101010101010101010101010101010103500202020202020202020202020202020204040505061b00000191a2032200071b00000191a20c49c00850030303030303030303030303030303030918630a582004040404040404040404040404040404040404040404040404040404040404040b1903e80c010da1016666666d7065670e50050505050505050505050505050505050f58200606060606060606060606060606060606060606060606060606060606060606105820070707070707070707070707070707070707070707070707070707070707070711a1016666726f7a656e1273696e7374616c6c206d6564696120746f6f6c7313f6",
+      "error": "unknown_field"
+    }
+  ]
+}
