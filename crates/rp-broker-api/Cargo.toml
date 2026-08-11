@@ -6,5 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[dependencies]
+rp-protocol = { path = "../rp-protocol" }
+thiserror = "2.0.12"
+
 [lints]
 workspace = true
