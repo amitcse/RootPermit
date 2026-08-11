@@ -65,6 +65,8 @@ macro_rules! fixed_bytes {
 }
 
 fixed_bytes!(RequestId, 16, "request ID");
+fixed_bytes!(ReceiptId, 16, "receipt ID");
+fixed_bytes!(ServiceEventId, 16, "service event ID");
 fixed_bytes!(DeviceId, 16, "device ID");
 fixed_bytes!(BootId, 16, "boot ID");
 fixed_bytes!(PolicyId, 16, "policy ID");

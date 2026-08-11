@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "profile": "RFC9052-Sign1-Ed25519-RootPermit-v1",
+  "vectors": [
+    {
+      "name": "broker-request-ed25519",
+      "cose_hex": "d2844fa30127030104480909090909090909a043a10101584040ac4f6de2fd626c6ee5d82533e83248f6c058833f1b12acfd148cea51ff4bec04cb843e8fdee0dff09e688356d728799dba844a00e640a79e9020afa898150b",
+      "payload_hex": "a10101",
+      "public_key_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "kid_hex": "0909090909090909",
+      "content_type": 1,
+      "domain": "request",
+      "role": "broker",
+      "now_utc": 10
+    }
+  ]
+}

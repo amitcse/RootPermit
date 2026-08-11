@@ -16,6 +16,10 @@ pub enum CborValue {
     Text(String),
     Array(Vec<CborValue>),
     Map(Vec<(CborValue, CborValue)>),
+    /// COSE_Sign1 is the sole tagged value admitted by the RootPermit v1
+    /// profile.  Typed schemas do not accept tags in their payloads; the COSE
+    /// module accepts tag 18 only at its own envelope boundary.
+    Tag(u64, Box<CborValue>),
     Bool(bool),
     Null,
 }
@@ -53,6 +57,8 @@ pub enum DecodeError {
     UnexpectedEof,
     #[error("CBOR uses an unsupported major type or simple value")]
     UnsupportedType,
+    #[error("CBOR tag {tag} is not permitted by the RootPermit v1 profile")]
+    UnsupportedTag { tag: u64 },
     #[error("indefinite-length CBOR is forbidden")]
     IndefiniteLength,
     #[error("CBOR integer or length is not minimally encoded")]
@@ -154,6 +160,13 @@ fn encode_into(value: &CborValue, output: &mut Vec<u8>) -> Result<(), EncodeErro
                 encode_into(value, output)?;
             }
         }
+        CborValue::Tag(tag, value) => {
+            if *tag != 18 {
+                return Err(EncodeError::Profile(DecodeError::UnsupportedTag { tag: *tag }));
+            }
+            write_head(6, *tag, output);
+            encode_into(value, output)?;
+        }
         CborValue::Bool(false) => output.push(0xf4),
         CborValue::Bool(true) => output.push(0xf5),
         CborValue::Null => output.push(0xf6),
@@ -247,6 +260,13 @@ impl Parser<'_> {
                     entries.push((key, value));
                 }
                 Ok(CborValue::Map(entries))
+            }
+            6 => {
+                let tag = self.argument(additional)?;
+                if tag != 18 {
+                    return Err(DecodeError::UnsupportedTag { tag });
+                }
+                Ok(CborValue::Tag(tag, Box::new(self.value(depth + 1)?)))
             }
             7 => match additional {
                 20 => Ok(CborValue::Bool(false)),

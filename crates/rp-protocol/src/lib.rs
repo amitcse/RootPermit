@@ -7,14 +7,19 @@
 #![forbid(unsafe_code)]
 
 pub mod cbor;
+pub mod cose;
 pub mod digest;
 pub mod ids;
 pub mod schema;
 
 pub use cbor::{decode, encode, CborLimits, CborValue, DecodeError, EncodeError};
+pub use cose::{CoseError, CoseSign1, KeyRole, VerificationKey, VerificationPolicy};
 pub use digest::{digest_cbor, Domain, Digest};
-pub use ids::{BootId, DeviceId, IdentifierError, Nonce, PolicyId, RequestId};
-pub use schema::{ApprovalContext, Decision, Operation, OperationInput, Request, SchemaError};
+pub use ids::{BootId, DeviceId, IdentifierError, Nonce, PolicyId, ReceiptId, RequestId, ServiceEventId};
+pub use schema::{
+    ApprovalContext, Decision, DecisionSubmission, EnrollmentStatement, LifecycleEvent, Operation,
+    OperationInput, PlanManifest, Receipt, RevocationEvent, SchemaError, ServiceKeyset,
+};
 
 /// The only protocol version implemented by this crate.
 pub const VERSION: u64 = 1;
