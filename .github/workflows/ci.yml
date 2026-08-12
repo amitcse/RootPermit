@@ -27,7 +27,7 @@ jobs:
       m4: ${{ steps.select.outputs.m4 }}
       m5: ${{ steps.select.outputs.m5 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 2
       - id: select
@@ -51,7 +51,7 @@ jobs:
     if: needs.lanes.outputs.fast == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.89.0
@@ -99,7 +99,7 @@ jobs:
       PGUSER: rootpermit_ci_owner
       PGPASSWORD: rootpermit_ci_password
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
@@ -121,7 +121,7 @@ jobs:
     if: needs.lanes.outputs.privileged == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
