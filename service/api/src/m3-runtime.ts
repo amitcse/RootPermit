@@ -20,12 +20,25 @@ export interface M3RuntimeOptions {
   readonly authenticateAccount: (email: string, password: string) => Promise<AccountIdentity | null>;
   /** Mutual TLS/session validation happens in the hosting adapter, before this callback returns true. */
   readonly authenticateRelay: (request: Request) => Promise<boolean>;
-  /** The service uses this adapter only to produce a bounded assertion reference. */
+  /**
+   * The WebAuthn adapter verifies the browser ceremony and returns the exact,
+   * canonical DecisionSubmission bytes that the broker will independently
+   * verify. The service may retain only an assertion reference.
+   */
   readonly verifyCeremony: (
     requestId: string,
     payload: unknown,
-  ) => Promise<VerifiedCeremonyInput | null>;
+  ) => Promise<VerifiedBrokerCeremonyInput | null>;
+  /** Private service signer: emits an opaque, broker-verifiable revocation proof. */
+  readonly issueRevocationProof: (input: {
+    readonly credentialBindingPublicId: string;
+    readonly devicePublicId: string;
+  }) => Promise<Uint8Array>;
   readonly now?: () => number;
+}
+
+export interface VerifiedBrokerCeremonyInput extends VerifiedCeremonyInput {
+  readonly brokerDecisionSubmission: Uint8Array;
 }
 
 interface Session extends AccountIdentity {
@@ -73,6 +86,7 @@ interface RequestRecord {
 
 interface RelayMessage {
   readonly direction: "broker_to_service" | "service_to_broker";
+  readonly kind: "decision_submission" | "revocation_event";
   readonly envelopeId: string;
   readonly idempotencyKey: string;
   readonly payload: Uint8Array;
@@ -88,6 +102,7 @@ export class M3Runtime {
   private readonly authenticateAccount: M3RuntimeOptions["authenticateAccount"];
   private readonly authenticateRelay: M3RuntimeOptions["authenticateRelay"];
   private readonly verifyCeremony: M3RuntimeOptions["verifyCeremony"];
+  private readonly issueRevocationProof: M3RuntimeOptions["issueRevocationProof"];
   private readonly now: () => number;
   private readonly sessions = new Map<string, Session>();
   private readonly pairings = new Map<string, Pairing>();
@@ -106,6 +121,7 @@ export class M3Runtime {
     this.authenticateAccount = options.authenticateAccount;
     this.authenticateRelay = options.authenticateRelay;
     this.verifyCeremony = options.verifyCeremony;
+    this.issueRevocationProof = options.issueRevocationProof;
     this.now = options.now ?? Date.now;
   }
 
@@ -181,6 +197,14 @@ export class M3Runtime {
     if (device === undefined || device.tenantId !== input.tenantId || input.envelope.byteLength < 1 || input.envelope.byteLength > MAX_RELAY_BYTES) {
       throw new Error("invalid_envelope");
     }
+    const existing = this.requests.get(input.publicId);
+    if (existing !== undefined) {
+      if (existing.tenantId === input.tenantId
+        && existing.devicePublicId === input.devicePublicId
+        && existing.expiresAt === input.expiresAt
+        && equalBytes(existing.envelope, input.envelope)) return;
+      throw new Error("request_replayed");
+    }
     this.requests.set(input.publicId, { ...input, envelope: new Uint8Array(input.envelope), projection: "pending" });
   }
 
@@ -205,7 +229,7 @@ export class M3Runtime {
       const requestRoute = /^\/v1\/requests\/([A-Za-z0-9_-]{22})(?:\/(status|decisions))?$/.exec(url.pathname);
       if (requestRoute !== null) return await this.requestRoute(session, requestRoute[1]!, requestRoute[2], request);
       const revocation = /^\/v1\/credentials\/([A-Za-z0-9_-]{22})\/revocations$/.exec(url.pathname);
-      if (revocation !== null && request.method === "POST") return this.revocationRoute(session, revocation[1]!, request);
+      if (revocation !== null && request.method === "POST") return await this.revocationRoute(session, revocation[1]!, request);
       return problem(404, "not_found_or_not_authorized", "The requested RootPermit resource is unavailable.");
     } catch (error) {
       return this.mapError(error);
@@ -263,6 +287,10 @@ export class M3Runtime {
       if (record.projection !== "pending" || record.expiresAt <= this.now()) throw new Error("request_not_pending");
       const ceremonyInput = await this.verifyCeremony(requestId, await jsonObject(request));
       if (ceremonyInput === null) throw new Error("invalid_decision");
+      requireOpaqueEnvelope(ceremonyInput.brokerDecisionSubmission, "broker decision submission");
+      // The verifier can yield. Claim the pending projection only after it
+      // returns so concurrent approve/deny ceremonies cannot both forward.
+      if (record.projection !== "pending" || record.expiresAt <= this.now()) throw new Error("request_not_pending");
       const credential = this.credentials.get(ceremonyInput.credentialBindingPublicId);
       if (credential === undefined || credential.tenantId !== session.tenantId || credential.devicePublicId !== record.devicePublicId) {
         throw new Error("not_found_or_not_authorized");
@@ -270,28 +298,27 @@ export class M3Runtime {
       if (credential.quarantined) throw new Error("credential_quarantined");
       const ceremony = verifiedApprovalCeremonyFromWebAuthn(ceremonyInput);
       const decisionId = randomPublicId();
-      this.queueToBroker({
-        requestPublicId: requestId,
-        decisionPublicId: decisionId,
-        decision: ceremony.decision,
-        credentialBindingPublicId: ceremony.credentialBindingPublicId,
-        assertionReference: Buffer.from(ceremony.assertionReference).toString("base64url"),
-      });
+      this.queueOpaqueToBroker("decision_submission", ceremonyInput.brokerDecisionSubmission);
       record.projection = ceremony.decision === "approve" ? "approved" : "denied";
       return json({ decisionId, accepted: true }, 202);
     }
     throw new Error("not_found_or_not_authorized");
   }
 
-  private revocationRoute(session: Session, credentialId: string, request: Request): Response {
+  private async revocationRoute(session: Session, credentialId: string, request: Request): Promise<Response> {
     this.requireCsrf(request, session);
     const credential = this.credentials.get(credentialId);
     if (credential === undefined || credential.tenantId !== session.tenantId) throw new Error("not_found_or_not_authorized");
+    const proof = await this.issueRevocationProof({
+      credentialBindingPublicId: credentialId,
+      devicePublicId: credential.devicePublicId,
+    });
+    requireOpaqueEnvelope(proof, "revocation proof");
     credential.quarantined = true;
     const remaining = [...this.credentials.values()].filter((candidate) => candidate.devicePublicId === credential.devicePublicId && !candidate.quarantined).length;
     const device = this.devices.get(credential.devicePublicId)!;
     if (remaining === 0) device.enrollmentState = "approval_locked";
-    this.queueToBroker({ type: "revocation", credentialBindingPublicId: credentialId, devicePublicId: credential.devicePublicId });
+    this.queueOpaqueToBroker("revocation_event", proof);
     return json({ quarantined: true, enrollmentState: device.enrollmentState }, 202);
   }
 
@@ -318,15 +345,21 @@ export class M3Runtime {
     if (!await this.authenticateRelay(request)) throw new Error("relay_authentication_failed");
     const messages = this.relayOutbox.map((message) => ({
       envelopeId: message.envelopeId,
+      kind: message.kind,
       idempotencyKey: message.idempotencyKey,
       payload: Buffer.from(message.payload).toString("base64url"),
     }));
     return json({ messages });
   }
 
-  private queueToBroker(value: Record<string, unknown>): void {
-    const payload = new TextEncoder().encode(JSON.stringify(value));
-    this.relayOutbox.push({ direction: "service_to_broker", envelopeId: randomPublicId(), idempotencyKey: randomToken(), payload });
+  private queueOpaqueToBroker(kind: RelayMessage["kind"], payload: Uint8Array): void {
+    this.relayOutbox.push({
+      direction: "service_to_broker",
+      kind,
+      envelopeId: randomPublicId(),
+      idempotencyKey: randomToken(),
+      payload: new Uint8Array(payload),
+    });
   }
 
   private requireSession(request: Request): Session {
@@ -378,7 +411,7 @@ export class M3Runtime {
     if (["session_expired", "authentication_failed"].includes(code)) return problem(401, code, "Sign in is required.");
     if (["csrf_failed", "relay_authentication_failed"].includes(code)) return problem(403, code, "This request was rejected by RootPermit security checks.");
     if (["not_found_or_not_authorized", "pairing_mismatch"].includes(code)) return problem(404, "not_found_or_not_authorized", "The requested RootPermit resource is unavailable.");
-    if (["credential_quarantined", "request_not_pending", "invalid_decision", "pairing_replayed", "credential_limit_reached"].includes(code)) return problem(409, code, "This RootPermit action is no longer available.");
+    if (["credential_quarantined", "request_not_pending", "invalid_decision", "pairing_replayed", "request_replayed", "credential_limit_reached"].includes(code)) return problem(409, code, "This RootPermit action is no longer available.");
     return problem(400, "invalid_input", "RootPermit could not process that request.");
   }
 }
@@ -430,6 +463,7 @@ function randomToken(): string { return randomBytes(32).toString("base64url"); }
 function randomPublicId(): string { return randomBytes(16).toString("base64url"); }
 function requirePublicId(value: string, name: string): void { if (!PUBLIC_ID.test(value)) throw new Error(`${name} is invalid`); }
 function requireBytes(value: Uint8Array, length: number, name: string): void { if (!(value instanceof Uint8Array) || value.byteLength !== length) throw new Error(`${name} is invalid`); }
+function requireOpaqueEnvelope(value: Uint8Array, name: string): void { if (!(value instanceof Uint8Array) || value.byteLength < 1 || value.byteLength > MAX_RELAY_BYTES) throw new Error(`${name} is invalid`); }
 function digest(domain: string, value: Uint8Array): Uint8Array { return createHash("sha256").update(`rootpermit/${domain}/v1\0`).update(value).digest(); }
 function digestText(domain: string, value: string): Uint8Array { return digest(domain, new TextEncoder().encode(value)); }
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean { return left.byteLength === right.byteLength && timingSafeEqual(left, right); }

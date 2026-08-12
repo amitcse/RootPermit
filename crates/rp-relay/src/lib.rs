@@ -310,7 +310,17 @@ impl FileRelaySpool {
             .map_err(|error| RelayError::Storage(error.to_string()))?;
         file.sync_all()
             .map_err(|error| RelayError::Storage(error.to_string()))?;
-        fs::rename(temporary, &self.path).map_err(|error| RelayError::Storage(error.to_string()))
+        fs::rename(temporary, &self.path)
+            .map_err(|error| RelayError::Storage(error.to_string()))?;
+        // A rename is not power-loss durable until its parent directory entry
+        // is synced. Without this, enqueue/acknowledge could report success
+        // while the old snapshot reappears after a crash.
+        if let Some(parent) = self.path.parent() {
+            fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| RelayError::Storage(error.to_string()))?;
+        }
+        Ok(())
     }
 }
 
