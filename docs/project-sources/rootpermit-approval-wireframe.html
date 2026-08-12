@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RootPermit hosted web approval flow — reconciled wireframe</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px; font-family: system-ui, sans-serif; color: #222; background: #f3f3f3; }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    .intro { margin: 0 0 26px; color: #555; font-size: 14px; }
+    .flow { display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; }
+    .state { width: 340px; }
+    .state > h2 { font-size: 14px; font-weight: 600; margin: 0 0 8px; color: #555; }
+    .phone { width: 340px; min-height: 680px; border: 2px solid #444; border-radius: 28px; background: white; padding: 20px 18px 22px; box-shadow: 4px 5px 0 #bbb; }
+    .status { text-align: center; font-size: 11px; color: #777; margin-bottom: 16px; }
+    .brand { font-weight: 700; font-size: 17px; border-bottom: 1px solid #bbb; padding-bottom: 12px; margin-bottom: 18px; }
+    .eyebrow { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: #666; }
+    h3 { font-size: 22px; line-height: 1.2; margin: 6px 0 10px; }
+    .risk { display: inline-block; border: 1px solid #555; border-radius: 999px; padding: 5px 9px; font-size: 12px; margin-bottom: 16px; }
+    .summary { border: 1px solid #aaa; padding: 12px; margin: 0 0 14px; }
+    .summary strong { display: block; font-size: 18px; margin-bottom: 3px; }
+    .row { display: grid; grid-template-columns: 120px 1fr; gap: 8px; border-top: 1px solid #ddd; padding: 9px 0; font-size: 13px; }
+    .row:first-child { border-top: 0; }
+    .label { color: #666; }
+    details { border-top: 1px solid #bbb; padding: 11px 0; font-size: 13px; }
+    details:last-of-type { border-bottom: 1px solid #bbb; }
+    summary { cursor: pointer; font-weight: 600; }
+    .agent-note { border: 1px dashed #888; padding: 10px; margin: 14px 0; font-size: 12px; }
+    .agent-note strong { display: block; margin-bottom: 4px; }
+    .digest { font-family: ui-monospace, monospace; font-size: 10px; word-break: break-all; color: #666; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 18px; }
+    button { padding: 13px 8px; border: 2px solid #333; background: white; font: inherit; font-weight: 700; }
+    button.primary { background: #333; color: white; }
+    .confirm { border: 2px solid #444; padding: 18px; margin-top: 90px; }
+    .confirm h3 { font-size: 19px; }
+    .confirm p { font-size: 13px; line-height: 1.45; }
+    .hold { width: 100%; margin-top: 14px; height: 48px; }
+    .result { text-align: center; margin-top: 80px; }
+    .result-mark { width: 64px; height: 64px; border: 2px solid #333; border-radius: 50%; display: grid; place-items: center; font-size: 30px; margin: 0 auto 18px; }
+    .result p { color: #555; font-size: 13px; line-height: 1.45; }
+    .receipt { text-align: left; border: 1px solid #aaa; padding: 12px; margin-top: 24px; }
+    .receipt .row { grid-template-columns: 90px 1fr; }
+    .note { margin-top: 24px; max-width: 1080px; font-size: 12px; color: #666; }
+  </style>
+</head>
+<body>
+  <h1>RootPermit hosted web approval</h1>
+  <p class="intro">Reconciled MVP interaction sketch. Routine approval is completed remotely on the trusted official website with an enrolled passkey; no machine session is required.</p>
+  <main class="flow">
+    <!-- State 1 prioritizes operation, device, transaction consequences, and provenance before the agent's explanation. -->
+    <section class="state">
+      <h2>1. Inspect exact transaction</h2>
+      <div class="phone">
+        <div class="status">12:42 • Secure request</div>
+        <div class="brand">RootPermit</div>
+        <div class="eyebrow">Approval required</div>
+        <h3>Install 1 package on build-vm-01</h3>
+        <span class="risk">NORMAL RISK</span>
+        <div class="summary">
+          <strong>ffmpeg 7:6.1.1-3ubuntu5</strong>
+          Ubuntu noble / amd64
+        </div>
+        <div class="row"><span class="label">Requested by</span><span>agent-runner · UID 1001</span></div>
+        <div class="row"><span class="label">Dependencies</span><span>17 added</span></div>
+        <div class="row"><span class="label">Removals</span><span>None</span></div>
+        <div class="row"><span class="label">Downgrades</span><span>None</span></div>
+        <div class="row"><span class="label">Disk impact</span><span>+94 MB</span></div>
+        <div class="row"><span class="label">Expires</span><span>in 4 min 12 sec</span></div>
+        <details><summary>View all package changes (18)</summary></details>
+        <details><summary>Verify device and policy</summary></details>
+        <div class="agent-note"><strong>Untrusted agent explanation</strong>“Required to inspect a video file.”</div>
+        <div class="digest">Request digest: 64f0…a912</div>
+        <div class="actions"><button>Deny</button><button class="primary">Review &amp; approve</button></div>
+      </div>
+    </section>
+
+    <!-- State 2 makes the trusted-web boundary explicit before passkey confirmation. -->
+    <section class="state">
+      <h2>2. Confirm signed decision</h2>
+      <div class="phone">
+        <div class="status">12:43 • Secure request</div>
+        <div class="brand">RootPermit</div>
+        <div class="confirm">
+          <div class="eyebrow">Final confirmation</div>
+          <h3>Authorize this exact package transaction?</h3>
+          <p>Your passkey will authorize request <strong>64f0…a912</strong>. Only <strong>build-vm-01</strong> can consume it, once, before expiry.</p>
+          <div class="row"><span class="label">Install</span><span>ffmpeg + 17 dependencies</span></div>
+          <div class="row"><span class="label">Remove</span><span>Nothing</span></div>
+          <div class="row"><span class="label">Policy</span><span>v12</span></div>
+          <div class="row"><span class="label">Approval</span><span>Phone-only passkey confirmation</span></div>
+          <div class="agent-note"><strong>Trusted approval surface</strong>The official RootPermit website verifies the broker-signed request and renders the authoritative package plan. The MVP trusts this website and its deployment pipeline.</div>
+          <button class="primary hold">Approve with passkey</button>
+          <button class="hold">Go back</button>
+          <p>Your browser will ask one of the device's enrolled passkeys to verify you. RootPermit binds the signed decision to this request, device, digest, expiry, protocol version, and credential generation.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- State 3 closes the loop with an immutable receipt, not merely a success toast. -->
+    <section class="state">
+      <h2>3. Verify execution receipt</h2>
+      <div class="phone">
+        <div class="status">12:44 • Request complete</div>
+        <div class="brand">RootPermit</div>
+        <div class="result">
+          <div class="result-mark">✓</div>
+          <h3>Installed successfully</h3>
+          <p>The broker executed the approved frozen transaction. No packages were removed or downgraded.</p>
+          <div class="receipt">
+            <div class="row"><span class="label">Device</span><span>build-vm-01</span></div>
+            <div class="row"><span class="label">Finished</span><span>12:44:08</span></div>
+            <div class="row"><span class="label">Result</span><span>Exit code 0</span></div>
+            <div class="row"><span class="label">Receipt</span><span class="digest">b730…19ce</span></div>
+          </div>
+          <button class="hold">View complete receipt</button>
+        </div>
+      </div>
+    </section>
+  </main>
+  <p class="note">Not shown: denied, expired, cancelled, stale, signature-invalid, policy-changed, broker-offline, credential-recovery-required, and execution-failed states. Enrollment and credential recovery may use a root-controlled console or SSH session; routine approvals never do.</p>
+</body>
+</html>
