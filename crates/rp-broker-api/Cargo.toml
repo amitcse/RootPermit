@@ -8,9 +8,9 @@ publish = false
 
 [dependencies]
 libc = "0.2.176"
-rp-protocol = { path = "../rp-protocol" }
+rp-protocol = { path = "../rp-protocol", version = "0.1.0" }
 thiserror = "2.0.12"
-rp-peercred = { path = "../rp-peercred" }
+rp-peercred = { path = "../rp-peercred", version = "0.0.0" }
 
 [lints]
 workspace = true
