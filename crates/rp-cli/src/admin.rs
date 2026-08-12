@@ -11,12 +11,9 @@ use rp_cli::{
 };
 
 fn main() {
-    let arguments = match utf8_arguments(std::env::args_os().skip(1).collect()) {
-        Some(arguments) => arguments,
-        None => {
-            println!("{}", invalid_arguments_json());
-            return;
-        }
+    let Some(arguments) = utf8_arguments(std::env::args_os().skip(1).collect()) else {
+        println!("{}", invalid_arguments_json());
+        return;
     };
 
     match parse_admin_command(&arguments) {
@@ -26,5 +23,8 @@ fn main() {
 }
 
 fn utf8_arguments(arguments: Vec<OsString>) -> Option<Vec<String>> {
-    arguments.into_iter().map(OsString::into_string).collect()
+    arguments
+        .into_iter()
+        .map(|argument| argument.into_string().ok())
+        .collect()
 }

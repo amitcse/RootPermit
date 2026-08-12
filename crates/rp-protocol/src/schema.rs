@@ -1,8 +1,10 @@
 use crate::{
-    cbor::{self, CborValue, DecodeError, EncodeError},
-    digest::{digest_cbor, Digest, Domain},
-    ids::{BootId, DeviceId, IdentifierError, Nonce, PolicyId, ReceiptId, RequestId, ServiceEventId},
     VERSION,
+    cbor::{self, CborValue, DecodeError, EncodeError},
+    digest::{Digest, Domain, digest_cbor},
+    ids::{
+        BootId, DeviceId, IdentifierError, Nonce, PolicyId, ReceiptId, RequestId, ServiceEventId,
+    },
 };
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -70,7 +72,10 @@ impl OperationInput {
     fn to_cbor(&self) -> CborValue {
         // Nested schema fields are integer-keyed for the same deterministic
         // profile as the enclosing security-critical message.
-        CborValue::Map(vec![(CborValue::Unsigned(1), CborValue::Text(self.package_name.clone()))])
+        CborValue::Map(vec![(
+            CborValue::Unsigned(1),
+            CborValue::Text(self.package_name.clone()),
+        )])
     }
 
     fn from_cbor(value: CborValue) -> Result<Self, SchemaError> {
@@ -188,7 +193,12 @@ impl Request {
 
     pub fn from_cbor(value: CborValue) -> Result<Self, SchemaError> {
         let mut fields = fields(value)?;
-        reject_unknown(&fields, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])?;
+        reject_unknown(
+            &fields,
+            &[
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+            ],
+        )?;
         version(&mut fields)?;
         let request = Self {
             request_id: RequestId::try_from(required_bytes(&mut fields, 2, 16)?.as_slice())?,
@@ -380,20 +390,32 @@ impl PlanManifest {
     #[must_use]
     pub fn to_cbor(&self) -> CborValue {
         CborValue::Map(vec![
-            field(1, CborValue::Unsigned(VERSION)), field(2, bytes(&self.plan_digest)),
-            field(3, CborValue::Array(self.inputs.clone())), field(4, self.action_graph.clone()),
-            field(5, bytes(&self.policy_digest)), field(6, signed(self.created_utc)),
-            field(7, self.toolchain.clone()), field(8, self.prestate_observation.clone()),
+            field(1, CborValue::Unsigned(VERSION)),
+            field(2, bytes(&self.plan_digest)),
+            field(3, CborValue::Array(self.inputs.clone())),
+            field(4, self.action_graph.clone()),
+            field(5, bytes(&self.policy_digest)),
+            field(6, signed(self.created_utc)),
+            field(7, self.toolchain.clone()),
+            field(8, self.prestate_observation.clone()),
         ])
     }
 
     #[must_use]
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SchemaError> { self.validate()?; Ok(cbor::encode(&self.to_cbor())?) }
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SchemaError> {
+        self.validate()?;
+        Ok(cbor::encode(&self.to_cbor())?)
+    }
 
     #[must_use]
-    pub fn digest(&self) -> Result<Digest, SchemaError> { self.validate()?; Ok(digest_cbor(Domain::AptPlan, &self.to_cbor())?) }
+    pub fn digest(&self) -> Result<Digest, SchemaError> {
+        self.validate()?;
+        Ok(digest_cbor(Domain::AptPlan, &self.to_cbor())?)
+    }
 
-    pub fn validate(&self) -> Result<(), SchemaError> { Self::from_cbor(self.to_cbor()).map(|_| ()) }
+    pub fn validate(&self) -> Result<(), SchemaError> {
+        Self::from_cbor(self.to_cbor()).map(|_| ())
+    }
 
     pub fn decode(input: &[u8]) -> Result<Self, SchemaError> {
         let value = Self::from_cbor(cbor::decode(input)?)?;
@@ -406,9 +428,12 @@ impl PlanManifest {
         reject_unknown(&fields, &[1, 2, 3, 4, 5, 6, 7, 8])?;
         version(&mut fields)?;
         Ok(Self {
-            plan_digest: digest_field(&mut fields, 2)?, inputs: required_array(&mut fields, 3)?,
-            action_graph: required_map(&mut fields, 4)?, policy_digest: digest_field(&mut fields, 5)?,
-            created_utc: required_signed(&mut fields, 6)?, toolchain: required_map(&mut fields, 7)?,
+            plan_digest: digest_field(&mut fields, 2)?,
+            inputs: required_array(&mut fields, 3)?,
+            action_graph: required_map(&mut fields, 4)?,
+            policy_digest: digest_field(&mut fields, 5)?,
+            created_utc: required_signed(&mut fields, 6)?,
+            toolchain: required_map(&mut fields, 7)?,
             prestate_observation: required_map(&mut fields, 8)?,
         })
     }
@@ -434,18 +459,29 @@ impl LifecycleEvent {
     #[must_use]
     pub fn to_cbor(&self) -> CborValue {
         let mut entries = vec![
-            field(1, CborValue::Unsigned(VERSION)), field(2, bytes(self.request_id.as_ref())),
-            field(3, CborValue::Unsigned(self.sequence)), field(5, bytes(&self.request_digest)),
-            field(6, CborValue::Unsigned(self.broker_epoch)), field(7, CborValue::Unsigned(self.transition)),
-            field(8, signed(self.occurred_utc)), field(9, CborValue::Unsigned(self.detail_code)),
+            field(1, CborValue::Unsigned(VERSION)),
+            field(2, bytes(self.request_id.as_ref())),
+            field(3, CborValue::Unsigned(self.sequence)),
+            field(5, bytes(&self.request_digest)),
+            field(6, CborValue::Unsigned(self.broker_epoch)),
+            field(7, CborValue::Unsigned(self.transition)),
+            field(8, signed(self.occurred_utc)),
+            field(9, CborValue::Unsigned(self.detail_code)),
         ];
-        if let Some(digest) = self.previous_event_digest { entries.push(field(4, bytes(&digest))); }
-        if let Some(digest) = self.detail_digest { entries.push(field(10, bytes(&digest))); }
+        if let Some(digest) = self.previous_event_digest {
+            entries.push(field(4, bytes(&digest)));
+        }
+        if let Some(digest) = self.detail_digest {
+            entries.push(field(10, bytes(&digest)));
+        }
         CborValue::Map(entries)
     }
 
     #[must_use]
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SchemaError> { self.validate()?; Ok(cbor::encode(&self.to_cbor())?) }
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SchemaError> {
+        self.validate()?;
+        Ok(cbor::encode(&self.to_cbor())?)
+    }
 
     pub fn validate(&self) -> Result<(), SchemaError> {
         let decoded = Self::from_cbor(self.to_cbor())?;
@@ -470,10 +506,14 @@ impl LifecycleEvent {
         version(&mut fields)?;
         Ok(Self {
             request_id: RequestId::try_from(required_bytes(&mut fields, 2, 16)?.as_slice())?,
-            sequence: required_unsigned(&mut fields, 3)?, previous_event_digest: optional_digest(&mut fields, 4)?,
-            request_digest: digest_field(&mut fields, 5)?, broker_epoch: required_unsigned(&mut fields, 6)?,
-            transition: required_unsigned(&mut fields, 7)?, occurred_utc: required_signed(&mut fields, 8)?,
-            detail_code: required_unsigned(&mut fields, 9)?, detail_digest: optional_digest(&mut fields, 10)?,
+            sequence: required_unsigned(&mut fields, 3)?,
+            previous_event_digest: optional_digest(&mut fields, 4)?,
+            request_digest: digest_field(&mut fields, 5)?,
+            broker_epoch: required_unsigned(&mut fields, 6)?,
+            transition: required_unsigned(&mut fields, 7)?,
+            occurred_utc: required_signed(&mut fields, 8)?,
+            detail_code: required_unsigned(&mut fields, 9)?,
+            detail_digest: optional_digest(&mut fields, 10)?,
         })
     }
 }
@@ -500,24 +540,38 @@ impl Receipt {
     #[must_use]
     pub fn to_cbor(&self) -> CborValue {
         CborValue::Map(vec![
-            field(1, CborValue::Unsigned(VERSION)), field(2, bytes(self.receipt_id.as_ref())),
-            field(3, bytes(self.request_id.as_ref())), field(4, bytes(&self.request_digest)),
-            field(5, bytes(&self.plan_digest)), field(6, CborValue::Unsigned(self.terminal_state)),
-            field(7, CborValue::Array(self.authorization_evidence.clone())), field(8, self.prestate_evidence.clone()),
-            field(9, self.execution_evidence.clone()), field(10, signed(self.created_utc)),
-            field(11, signed(self.completed_utc)), field(12, CborValue::Unsigned(self.broker_epoch)),
+            field(1, CborValue::Unsigned(VERSION)),
+            field(2, bytes(self.receipt_id.as_ref())),
+            field(3, bytes(self.request_id.as_ref())),
+            field(4, bytes(&self.request_digest)),
+            field(5, bytes(&self.plan_digest)),
+            field(6, CborValue::Unsigned(self.terminal_state)),
+            field(7, CborValue::Array(self.authorization_evidence.clone())),
+            field(8, self.prestate_evidence.clone()),
+            field(9, self.execution_evidence.clone()),
+            field(10, signed(self.created_utc)),
+            field(11, signed(self.completed_utc)),
+            field(12, CborValue::Unsigned(self.broker_epoch)),
         ])
     }
 
     #[must_use]
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SchemaError> { self.validate()?; Ok(cbor::encode(&self.to_cbor())?) }
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SchemaError> {
+        self.validate()?;
+        Ok(cbor::encode(&self.to_cbor())?)
+    }
 
     #[must_use]
-    pub fn digest(&self) -> Result<Digest, SchemaError> { self.validate()?; Ok(digest_cbor(Domain::Receipt, &self.to_cbor())?) }
+    pub fn digest(&self) -> Result<Digest, SchemaError> {
+        self.validate()?;
+        Ok(digest_cbor(Domain::Receipt, &self.to_cbor())?)
+    }
 
     pub fn validate(&self) -> Result<(), SchemaError> {
         let receipt = Self::from_cbor(self.to_cbor())?;
-        if receipt.completed_utc < receipt.created_utc { return Err(SchemaError::InvalidField { field: 11 }); }
+        if receipt.completed_utc < receipt.created_utc {
+            return Err(SchemaError::InvalidField { field: 11 });
+        }
         Ok(())
     }
 
@@ -534,10 +588,14 @@ impl Receipt {
         Ok(Self {
             receipt_id: ReceiptId::try_from(required_bytes(&mut fields, 2, 16)?.as_slice())?,
             request_id: RequestId::try_from(required_bytes(&mut fields, 3, 16)?.as_slice())?,
-            request_digest: digest_field(&mut fields, 4)?, plan_digest: digest_field(&mut fields, 5)?,
-            terminal_state: required_unsigned(&mut fields, 6)?, authorization_evidence: required_array(&mut fields, 7)?,
-            prestate_evidence: required_map(&mut fields, 8)?, execution_evidence: required_map(&mut fields, 9)?,
-            created_utc: required_signed(&mut fields, 10)?, completed_utc: required_signed(&mut fields, 11)?,
+            request_digest: digest_field(&mut fields, 4)?,
+            plan_digest: digest_field(&mut fields, 5)?,
+            terminal_state: required_unsigned(&mut fields, 6)?,
+            authorization_evidence: required_array(&mut fields, 7)?,
+            prestate_evidence: required_map(&mut fields, 8)?,
+            execution_evidence: required_map(&mut fields, 9)?,
+            created_utc: required_signed(&mut fields, 10)?,
+            completed_utc: required_signed(&mut fields, 11)?,
             broker_epoch: required_unsigned(&mut fields, 12)?,
         })
     }
@@ -562,22 +620,35 @@ impl EnrollmentStatement {
     #[must_use]
     pub fn to_cbor(&self) -> CborValue {
         CborValue::Map(vec![
-            field(1, CborValue::Unsigned(VERSION)), field(2, bytes(&self.tenant_subject_digest)),
-            field(3, bytes(self.device_id.as_ref())), field(4, bytes(&self.broker_pubkey)),
-            field(5, CborValue::Array(self.credential_set.clone())), field(6, bytes(&self.pairing_nonce)),
-            field(7, bytes(&self.comparison_digest)), field(8, CborValue::Text(self.rp_id.clone())),
-            field(9, CborValue::Text(self.origin.clone())), field(10, CborValue::Unsigned(self.next_generation)),
+            field(1, CborValue::Unsigned(VERSION)),
+            field(2, bytes(&self.tenant_subject_digest)),
+            field(3, bytes(self.device_id.as_ref())),
+            field(4, bytes(&self.broker_pubkey)),
+            field(5, CborValue::Array(self.credential_set.clone())),
+            field(6, bytes(&self.pairing_nonce)),
+            field(7, bytes(&self.comparison_digest)),
+            field(8, CborValue::Text(self.rp_id.clone())),
+            field(9, CborValue::Text(self.origin.clone())),
+            field(10, CborValue::Unsigned(self.next_generation)),
             field(11, signed(self.expires_utc)),
         ])
     }
 
     #[must_use]
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SchemaError> { self.validate()?; Ok(cbor::encode(&self.to_cbor())?) }
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SchemaError> {
+        self.validate()?;
+        Ok(cbor::encode(&self.to_cbor())?)
+    }
 
     #[must_use]
-    pub fn digest(&self) -> Result<Digest, SchemaError> { self.validate()?; Ok(digest_cbor(Domain::Enrollment, &self.to_cbor())?) }
+    pub fn digest(&self) -> Result<Digest, SchemaError> {
+        self.validate()?;
+        Ok(digest_cbor(Domain::Enrollment, &self.to_cbor())?)
+    }
 
-    pub fn validate(&self) -> Result<(), SchemaError> { Self::from_cbor(self.to_cbor()).map(|_| ()) }
+    pub fn validate(&self) -> Result<(), SchemaError> {
+        Self::from_cbor(self.to_cbor()).map(|_| ())
+    }
 
     pub fn decode(input: &[u8]) -> Result<Self, SchemaError> {
         let value = Self::from_cbor(cbor::decode(input)?)?;
@@ -592,11 +663,14 @@ impl EnrollmentStatement {
         Ok(Self {
             tenant_subject_digest: digest_field(&mut fields, 2)?,
             device_id: DeviceId::try_from(required_bytes(&mut fields, 3, 16)?.as_slice())?,
-            broker_pubkey: digest_field(&mut fields, 4)?, credential_set: required_array(&mut fields, 5)?,
-            pairing_nonce: digest_field(&mut fields, 6)?, comparison_digest: digest_field(&mut fields, 7)?,
+            broker_pubkey: digest_field(&mut fields, 4)?,
+            credential_set: required_array(&mut fields, 5)?,
+            pairing_nonce: digest_field(&mut fields, 6)?,
+            comparison_digest: digest_field(&mut fields, 7)?,
             rp_id: non_empty(required_text(&mut fields, 8, 253)?, 8)?,
             origin: non_empty(required_text(&mut fields, 9, 255)?, 9)?,
-            next_generation: required_unsigned(&mut fields, 10)?, expires_utc: required_signed(&mut fields, 11)?,
+            next_generation: required_unsigned(&mut fields, 10)?,
+            expires_utc: required_signed(&mut fields, 11)?,
         })
     }
 }
@@ -618,21 +692,32 @@ impl ServiceKeyset {
     #[must_use]
     pub fn to_cbor(&self) -> CborValue {
         CborValue::Map(vec![
-            field(1, CborValue::Unsigned(VERSION)), field(2, CborValue::Unsigned(self.keyset_version)),
-            field(3, signed(self.issued_utc)), field(4, CborValue::Array(self.keys.clone())),
-            field(5, bytes(&self.root_kid)), field(6, signed(self.expires_utc)),
+            field(1, CborValue::Unsigned(VERSION)),
+            field(2, CborValue::Unsigned(self.keyset_version)),
+            field(3, signed(self.issued_utc)),
+            field(4, CborValue::Array(self.keys.clone())),
+            field(5, bytes(&self.root_kid)),
+            field(6, signed(self.expires_utc)),
         ])
     }
 
     #[must_use]
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SchemaError> { self.validate()?; Ok(cbor::encode(&self.to_cbor())?) }
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SchemaError> {
+        self.validate()?;
+        Ok(cbor::encode(&self.to_cbor())?)
+    }
 
     #[must_use]
-    pub fn digest(&self) -> Result<Digest, SchemaError> { self.validate()?; Ok(digest_cbor(Domain::ServiceKeyset, &self.to_cbor())?) }
+    pub fn digest(&self) -> Result<Digest, SchemaError> {
+        self.validate()?;
+        Ok(digest_cbor(Domain::ServiceKeyset, &self.to_cbor())?)
+    }
 
     pub fn validate(&self) -> Result<(), SchemaError> {
         let keyset = Self::from_cbor(self.to_cbor())?;
-        if keyset.expires_utc <= keyset.issued_utc { return Err(SchemaError::InvalidField { field: 6 }); }
+        if keyset.expires_utc <= keyset.issued_utc {
+            return Err(SchemaError::InvalidField { field: 6 });
+        }
         Ok(())
     }
 
@@ -647,8 +732,10 @@ impl ServiceKeyset {
         reject_unknown(&fields, &[1, 2, 3, 4, 5, 6])?;
         version(&mut fields)?;
         Ok(Self {
-            keyset_version: required_unsigned(&mut fields, 2)?, issued_utc: required_signed(&mut fields, 3)?,
-            keys: required_array(&mut fields, 4)?, root_kid: required_bounded_bytes(&mut fields, 5, 8, 32)?,
+            keyset_version: required_unsigned(&mut fields, 2)?,
+            issued_utc: required_signed(&mut fields, 3)?,
+            keys: required_array(&mut fields, 4)?,
+            root_kid: required_bounded_bytes(&mut fields, 5, 8, 32)?,
             expires_utc: required_signed(&mut fields, 6)?,
         })
     }
@@ -669,22 +756,35 @@ impl RevocationEvent {
     #[must_use]
     pub fn to_cbor(&self) -> CborValue {
         CborValue::Map(vec![
-            field(1, CborValue::Unsigned(VERSION)), field(2, bytes(self.device_id.as_ref())),
-            field(3, bytes(&self.credential_id)), field(4, signed(self.cutoff_utc)),
-            field(5, bytes(self.service_event_id.as_ref())), field(6, CborValue::Unsigned(self.generation_at_issue)),
+            field(1, CborValue::Unsigned(VERSION)),
+            field(2, bytes(self.device_id.as_ref())),
+            field(3, bytes(&self.credential_id)),
+            field(4, signed(self.cutoff_utc)),
+            field(5, bytes(self.service_event_id.as_ref())),
+            field(6, CborValue::Unsigned(self.generation_at_issue)),
             field(7, CborValue::Unsigned(self.reason_code)),
         ])
     }
 
     #[must_use]
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SchemaError> { self.validate()?; Ok(cbor::encode(&self.to_cbor())?) }
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SchemaError> {
+        self.validate()?;
+        Ok(cbor::encode(&self.to_cbor())?)
+    }
 
     #[must_use]
-    pub fn digest(&self) -> Result<Digest, SchemaError> { self.validate()?; Ok(digest_cbor(Domain::Revocation, &self.to_cbor())?) }
+    pub fn digest(&self) -> Result<Digest, SchemaError> {
+        self.validate()?;
+        Ok(digest_cbor(Domain::Revocation, &self.to_cbor())?)
+    }
 
-    pub fn validate(&self) -> Result<(), SchemaError> { Self::from_cbor(self.to_cbor()).map(|_| ()) }
+    pub fn validate(&self) -> Result<(), SchemaError> {
+        Self::from_cbor(self.to_cbor()).map(|_| ())
+    }
 
-    pub fn decode(input: &[u8]) -> Result<Self, SchemaError> { Self::from_cbor(cbor::decode(input)?) }
+    pub fn decode(input: &[u8]) -> Result<Self, SchemaError> {
+        Self::from_cbor(cbor::decode(input)?)
+    }
 
     pub fn from_cbor(value: CborValue) -> Result<Self, SchemaError> {
         let mut fields = fields(value)?;
@@ -692,9 +792,13 @@ impl RevocationEvent {
         version(&mut fields)?;
         Ok(Self {
             device_id: DeviceId::try_from(required_bytes(&mut fields, 2, 16)?.as_slice())?,
-            credential_id: required_bounded_bytes(&mut fields, 3, 1, 1_024)?, cutoff_utc: required_signed(&mut fields, 4)?,
-            service_event_id: ServiceEventId::try_from(required_bytes(&mut fields, 5, 16)?.as_slice())?,
-            generation_at_issue: required_unsigned(&mut fields, 6)?, reason_code: required_unsigned(&mut fields, 7)?,
+            credential_id: required_bounded_bytes(&mut fields, 3, 1, 1_024)?,
+            cutoff_utc: required_signed(&mut fields, 4)?,
+            service_event_id: ServiceEventId::try_from(
+                required_bytes(&mut fields, 5, 16)?.as_slice(),
+            )?,
+            generation_at_issue: required_unsigned(&mut fields, 6)?,
+            reason_code: required_unsigned(&mut fields, 7)?,
         })
     }
 }
@@ -703,9 +807,9 @@ fn valid_package_name(package_name: &str) -> bool {
     let bytes = package_name.as_bytes();
     (1..=255).contains(&bytes.len())
         && bytes[0].is_ascii_lowercase()
-        && bytes[1..]
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'.' | b'-'))
+        && bytes[1..].iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'.' | b'-')
+        })
 }
 
 fn field(key: u64, value: CborValue) -> (CborValue, CborValue) {
@@ -717,14 +821,22 @@ fn bytes(value: &[u8]) -> CborValue {
 }
 
 fn signed(value: i64) -> CborValue {
-    if value >= 0 { CborValue::Unsigned(value.unsigned_abs()) } else { CborValue::Negative(value) }
+    if value >= 0 {
+        CborValue::Unsigned(value.unsigned_abs())
+    } else {
+        CborValue::Negative(value)
+    }
 }
 
 fn fields(value: CborValue) -> Result<BTreeMap<u64, CborValue>, SchemaError> {
-    let CborValue::Map(entries) = value else { return Err(SchemaError::RootNotMap) };
+    let CborValue::Map(entries) = value else {
+        return Err(SchemaError::RootNotMap);
+    };
     let mut fields = BTreeMap::new();
     for (key, value) in entries {
-        let CborValue::Unsigned(key) = key else { return Err(SchemaError::RootNotMap) };
+        let CborValue::Unsigned(key) = key else {
+            return Err(SchemaError::RootNotMap);
+        };
         if fields.insert(key, value).is_some() {
             // The profile decoder already catches this. Keep the invariant true
             // for callers that construct CborValue directly.
@@ -744,15 +856,24 @@ fn reject_unknown(fields: &BTreeMap<u64, CborValue>, known: &[u64]) -> Result<()
 }
 
 fn required(fields: &mut BTreeMap<u64, CborValue>, field: u64) -> Result<CborValue, SchemaError> {
-    fields.remove(&field).ok_or(SchemaError::MissingField { field })
+    fields
+        .remove(&field)
+        .ok_or(SchemaError::MissingField { field })
 }
 
 fn version(fields: &mut BTreeMap<u64, CborValue>) -> Result<(), SchemaError> {
     let actual = required_unsigned(fields, 1)?;
-    if actual == VERSION { Ok(()) } else { Err(SchemaError::ProtocolMismatch { actual }) }
+    if actual == VERSION {
+        Ok(())
+    } else {
+        Err(SchemaError::ProtocolMismatch { actual })
+    }
 }
 
-fn required_unsigned(fields: &mut BTreeMap<u64, CborValue>, field: u64) -> Result<u64, SchemaError> {
+fn required_unsigned(
+    fields: &mut BTreeMap<u64, CborValue>,
+    field: u64,
+) -> Result<u64, SchemaError> {
     match required(fields, field)? {
         CborValue::Unsigned(value) => Ok(value),
         _ => Err(SchemaError::WrongType { field }),
@@ -761,13 +882,19 @@ fn required_unsigned(fields: &mut BTreeMap<u64, CborValue>, field: u64) -> Resul
 
 fn required_signed(fields: &mut BTreeMap<u64, CborValue>, field: u64) -> Result<i64, SchemaError> {
     match required(fields, field)? {
-        CborValue::Unsigned(value) => i64::try_from(value).map_err(|_| SchemaError::InvalidField { field }),
+        CborValue::Unsigned(value) => {
+            i64::try_from(value).map_err(|_| SchemaError::InvalidField { field })
+        }
         CborValue::Negative(value) => Ok(value),
         _ => Err(SchemaError::WrongType { field }),
     }
 }
 
-fn required_bytes(fields: &mut BTreeMap<u64, CborValue>, field: u64, length: usize) -> Result<Vec<u8>, SchemaError> {
+fn required_bytes(
+    fields: &mut BTreeMap<u64, CborValue>,
+    field: u64,
+    length: usize,
+) -> Result<Vec<u8>, SchemaError> {
     match required(fields, field)? {
         CborValue::Bytes(value) if value.len() == length => Ok(value),
         CborValue::Bytes(_) => Err(SchemaError::InvalidField { field }),
@@ -800,21 +927,30 @@ fn optional_bounded_bytes(
     required_bounded_bytes(fields, field, minimum, maximum).map(Some)
 }
 
-fn optional_digest(fields: &mut BTreeMap<u64, CborValue>, field: u64) -> Result<Option<Digest>, SchemaError> {
+fn optional_digest(
+    fields: &mut BTreeMap<u64, CborValue>,
+    field: u64,
+) -> Result<Option<Digest>, SchemaError> {
     if !fields.contains_key(&field) {
         return Ok(None);
     }
     digest_field(fields, field).map(Some)
 }
 
-fn required_array(fields: &mut BTreeMap<u64, CborValue>, field: u64) -> Result<Vec<CborValue>, SchemaError> {
+fn required_array(
+    fields: &mut BTreeMap<u64, CborValue>,
+    field: u64,
+) -> Result<Vec<CborValue>, SchemaError> {
     match required(fields, field)? {
         CborValue::Array(values) => Ok(values),
         _ => Err(SchemaError::WrongType { field }),
     }
 }
 
-fn required_map(fields: &mut BTreeMap<u64, CborValue>, field: u64) -> Result<CborValue, SchemaError> {
+fn required_map(
+    fields: &mut BTreeMap<u64, CborValue>,
+    field: u64,
+) -> Result<CborValue, SchemaError> {
     match required(fields, field)? {
         value @ CborValue::Map(_) => Ok(value),
         _ => Err(SchemaError::WrongType { field }),
@@ -822,10 +958,16 @@ fn required_map(fields: &mut BTreeMap<u64, CborValue>, field: u64) -> Result<Cbo
 }
 
 fn digest_field(fields: &mut BTreeMap<u64, CborValue>, field: u64) -> Result<Digest, SchemaError> {
-    required_bytes(fields, field, 32)?.try_into().map_err(|_| SchemaError::InvalidField { field })
+    required_bytes(fields, field, 32)?
+        .try_into()
+        .map_err(|_| SchemaError::InvalidField { field })
 }
 
-fn required_text(fields: &mut BTreeMap<u64, CborValue>, field: u64, maximum: usize) -> Result<String, SchemaError> {
+fn required_text(
+    fields: &mut BTreeMap<u64, CborValue>,
+    field: u64,
+    maximum: usize,
+) -> Result<String, SchemaError> {
     match required(fields, field)? {
         CborValue::Text(value) if value.len() <= maximum => Ok(value),
         CborValue::Text(_) => Err(SchemaError::InvalidField { field }),
@@ -833,13 +975,23 @@ fn required_text(fields: &mut BTreeMap<u64, CborValue>, field: u64, maximum: usi
     }
 }
 
-fn optional_text(fields: &mut BTreeMap<u64, CborValue>, field: u64, maximum: usize) -> Result<Option<String>, SchemaError> {
-    if !fields.contains_key(&field) { return Ok(None) }
+fn optional_text(
+    fields: &mut BTreeMap<u64, CborValue>,
+    field: u64,
+    maximum: usize,
+) -> Result<Option<String>, SchemaError> {
+    if !fields.contains_key(&field) {
+        return Ok(None);
+    }
     required_text(fields, field, maximum).map(Some)
 }
 
 fn non_empty(value: String, field: u64) -> Result<String, SchemaError> {
-    if value.is_empty() { Err(SchemaError::InvalidField { field }) } else { Ok(value) }
+    if value.is_empty() {
+        Err(SchemaError::InvalidField { field })
+    } else {
+        Ok(value)
+    }
 }
 
 #[cfg(test)]
@@ -863,7 +1015,10 @@ mod tests {
             policy_id: PolicyId::new([5; 16]),
             policy_digest: [6; 32],
             plan_digest: [7; 32],
-            frozen_plan: CborValue::Map(vec![(CborValue::Unsigned(1), CborValue::Text("frozen".into()))]),
+            frozen_plan: CborValue::Map(vec![(
+                CborValue::Unsigned(1),
+                CborValue::Text("frozen".into()),
+            )]),
             agent_note: Some("install media tools".into()),
         }
     }
@@ -873,41 +1028,68 @@ mod tests {
         let request = request();
         let bytes = request.canonical_bytes().unwrap();
         assert_eq!(Request::decode(&bytes).unwrap(), request);
-        assert_eq!(cbor::encode(&Request::decode(&bytes).unwrap().to_cbor()).unwrap(), bytes);
+        assert_eq!(
+            cbor::encode(&Request::decode(&bytes).unwrap().to_cbor()).unwrap(),
+            bytes
+        );
     }
 
     #[test]
     fn request_rejects_unknown_field() {
         let mut map = request().to_cbor();
-        let CborValue::Map(entries) = &mut map else { unreachable!() };
+        let CborValue::Map(entries) = &mut map else {
+            unreachable!()
+        };
         entries.push(field(19, CborValue::Null));
-        assert_eq!(Request::from_cbor(map), Err(SchemaError::UnknownField { field: 19 }));
+        assert_eq!(
+            Request::from_cbor(map),
+            Err(SchemaError::UnknownField { field: 19 })
+        );
     }
 
     #[test]
     fn approval_decisions_have_distinct_challenges() {
         let common = ApprovalContext {
-            request_id: RequestId::new([1; 16]), device_id: DeviceId::new([2; 16]), broker_epoch: 1,
-            request_digest: [3; 32], generation: 2, nonce: Nonce::new([4; 32]),
-            rp_id: "rootpermit.example".into(), origin: "https://rootpermit.example".into(),
-            decision: Decision::Approve, expires_utc: 100,
+            request_id: RequestId::new([1; 16]),
+            device_id: DeviceId::new([2; 16]),
+            broker_epoch: 1,
+            request_digest: [3; 32],
+            generation: 2,
+            nonce: Nonce::new([4; 32]),
+            rp_id: "rootpermit.example".into(),
+            origin: "https://rootpermit.example".into(),
+            decision: Decision::Approve,
+            expires_utc: 100,
         };
         let mut deny = common.clone();
         deny.decision = Decision::Deny;
-        assert_ne!(common.webauthn_challenge().unwrap(), deny.webauthn_challenge().unwrap());
+        assert_ne!(
+            common.webauthn_challenge().unwrap(),
+            deny.webauthn_challenge().unwrap()
+        );
     }
 
     #[test]
     fn decision_submission_is_bounded_and_commits_to_its_context() {
         let context = ApprovalContext {
-            request_id: RequestId::new([1; 16]), device_id: DeviceId::new([2; 16]), broker_epoch: 1,
-            request_digest: [3; 32], generation: 2, nonce: Nonce::new([4; 32]),
-            rp_id: "rootpermit.example".into(), origin: "https://rootpermit.example".into(),
-            decision: Decision::Deny, expires_utc: 100,
+            request_id: RequestId::new([1; 16]),
+            device_id: DeviceId::new([2; 16]),
+            broker_epoch: 1,
+            request_digest: [3; 32],
+            generation: 2,
+            nonce: Nonce::new([4; 32]),
+            rp_id: "rootpermit.example".into(),
+            origin: "https://rootpermit.example".into(),
+            decision: Decision::Deny,
+            expires_utc: 100,
         };
         let submission = DecisionSubmission {
-            approval_context: context, credential_id: vec![9], authenticator_data: vec![1],
-            client_data_json: br#"{}"#.to_vec(), signature: vec![2], user_handle: None,
+            approval_context: context,
+            credential_id: vec![9],
+            authenticator_data: vec![1],
+            client_data_json: br"{}".to_vec(),
+            signature: vec![2],
+            user_handle: None,
         };
         let bytes = submission.canonical_bytes().unwrap();
         assert_eq!(DecisionSubmission::decode(&bytes).unwrap(), submission);

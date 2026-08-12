@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use core::fmt;
 use thiserror::Error;
 
@@ -33,11 +33,12 @@ macro_rules! fixed_bytes {
             type Error = IdentifierError;
 
             fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-                let bytes: [u8; $len] = value.try_into().map_err(|_| IdentifierError::WrongLength {
-                    name: $label,
-                    expected: $len,
-                    actual: value.len(),
-                })?;
+                let bytes: [u8; $len] =
+                    value.try_into().map_err(|_| IdentifierError::WrongLength {
+                        name: $label,
+                        expected: $len,
+                        actual: value.len(),
+                    })?;
                 Ok(Self(bytes))
             }
         }

@@ -98,7 +98,11 @@ pub fn decode_with_limits(input: &[u8], limits: CborLimits) -> Result<CborValue,
     if input.len() > limits.max_message_bytes {
         return Err(DecodeError::MessageTooLarge);
     }
-    let mut parser = Parser { input, offset: 0, limits };
+    let mut parser = Parser {
+        input,
+        offset: 0,
+        limits,
+    };
     let value = parser.value(0)?;
     if parser.offset != input.len() {
         return Err(DecodeError::TrailingBytes);
@@ -147,7 +151,10 @@ fn encode_into(value: &CborValue, output: &mut Vec<u8>) -> Result<(), EncodeErro
                 .map(|(key, value)| Ok((key, value, encode(key)?)))
                 .collect::<Result<_, EncodeError>>()?;
             entries.sort_by(|left, right| {
-                left.2.len().cmp(&right.2.len()).then_with(|| left.2.cmp(&right.2))
+                left.2
+                    .len()
+                    .cmp(&right.2.len())
+                    .then_with(|| left.2.cmp(&right.2))
             });
             for pair in entries.windows(2) {
                 if pair[0].2 == pair[1].2 {
@@ -162,7 +169,9 @@ fn encode_into(value: &CborValue, output: &mut Vec<u8>) -> Result<(), EncodeErro
         }
         CborValue::Tag(tag, value) => {
             if *tag != 18 {
-                return Err(EncodeError::Profile(DecodeError::UnsupportedTag { tag: *tag }));
+                return Err(EncodeError::Profile(DecodeError::UnsupportedTag {
+                    tag: *tag,
+                }));
             }
             write_head(6, *tag, output);
             encode_into(value, output)?;
@@ -225,12 +234,15 @@ impl Parser<'_> {
                 Ok(CborValue::Negative(value))
             }
             2 => {
-                let length = self.length(additional, self.limits.max_byte_string_bytes, "byte string")?;
+                let length =
+                    self.length(additional, self.limits.max_byte_string_bytes, "byte string")?;
                 Ok(CborValue::Bytes(self.take(length)?.to_vec()))
             }
             3 => {
-                let length = self.length(additional, self.limits.max_text_string_bytes, "text string")?;
-                let text = core::str::from_utf8(self.take(length)?).map_err(|_| DecodeError::InvalidUtf8)?;
+                let length =
+                    self.length(additional, self.limits.max_text_string_bytes, "text string")?;
+                let text = core::str::from_utf8(self.take(length)?)
+                    .map_err(|_| DecodeError::InvalidUtf8)?;
                 Ok(CborValue::Text(text.to_owned()))
             }
             4 => {
@@ -250,7 +262,10 @@ impl Parser<'_> {
                     let key = self.value(depth + 1)?;
                     let key_bytes = self.input[key_start..self.offset].to_vec();
                     if let Some(previous) = &previous_key {
-                        let ordering = previous.len().cmp(&key_bytes.len()).then_with(|| previous.cmp(&key_bytes));
+                        let ordering = previous
+                            .len()
+                            .cmp(&key_bytes.len())
+                            .then_with(|| previous.cmp(&key_bytes));
                         if ordering != Ordering::Less {
                             return Err(DecodeError::NonCanonicalMapOrder);
                         }
@@ -295,11 +310,21 @@ impl Parser<'_> {
             8 => value > u64::from(u32::MAX),
             _ => false,
         };
-        if canonical { Ok(value) } else { Err(DecodeError::NonCanonicalInteger) }
+        if canonical {
+            Ok(value)
+        } else {
+            Err(DecodeError::NonCanonicalInteger)
+        }
     }
 
-    fn length(&mut self, additional: u8, max: usize, kind: &'static str) -> Result<usize, DecodeError> {
-        let length = usize::try_from(self.argument(additional)?).map_err(|_| DecodeError::CollectionTooLarge { kind })?;
+    fn length(
+        &mut self,
+        additional: u8,
+        max: usize,
+        kind: &'static str,
+    ) -> Result<usize, DecodeError> {
+        let length = usize::try_from(self.argument(additional)?)
+            .map_err(|_| DecodeError::CollectionTooLarge { kind })?;
         if length > max {
             return Err(DecodeError::CollectionTooLarge { kind });
         }
@@ -307,20 +332,31 @@ impl Parser<'_> {
     }
 
     fn take_byte(&mut self) -> Result<u8, DecodeError> {
-        let byte = *self.input.get(self.offset).ok_or(DecodeError::UnexpectedEof)?;
+        let byte = *self
+            .input
+            .get(self.offset)
+            .ok_or(DecodeError::UnexpectedEof)?;
         self.offset += 1;
         Ok(byte)
     }
 
     fn take(&mut self, length: usize) -> Result<&[u8], DecodeError> {
-        let end = self.offset.checked_add(length).ok_or(DecodeError::UnexpectedEof)?;
-        let slice = self.input.get(self.offset..end).ok_or(DecodeError::UnexpectedEof)?;
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(DecodeError::UnexpectedEof)?;
+        let slice = self
+            .input
+            .get(self.offset..end)
+            .ok_or(DecodeError::UnexpectedEof)?;
         self.offset = end;
         Ok(slice)
     }
 
     fn take_array<const N: usize>(&mut self) -> Result<[u8; N], DecodeError> {
-        self.take(N)?.try_into().map_err(|_| DecodeError::UnexpectedEof)
+        self.take(N)?
+            .try_into()
+            .map_err(|_| DecodeError::UnexpectedEof)
     }
 }
 
@@ -335,14 +371,20 @@ mod tests {
             (CborValue::Unsigned(24), CborValue::Null),
             (CborValue::Unsigned(1), CborValue::Null),
         ]);
-        assert_eq!(encode(&map).unwrap(), vec![0xa3, 0x01, 0xf6, 0x18, 0x18, 0xf6, 0x61, b'z', 0xf6]);
+        assert_eq!(
+            encode(&map).unwrap(),
+            vec![0xa3, 0x01, 0xf6, 0x18, 0x18, 0xf6, 0x61, b'z', 0xf6]
+        );
     }
 
     #[test]
     fn rejects_noncanonical_and_unsafe_forms() {
         assert_eq!(decode(&[0x18, 0x01]), Err(DecodeError::NonCanonicalInteger));
         assert_eq!(decode(&[0x5f, 0xff]), Err(DecodeError::IndefiniteLength));
-        assert_eq!(decode(&[0xa2, 0x01, 0xf6, 0x01, 0xf6]), Err(DecodeError::NonCanonicalMapOrder));
+        assert_eq!(
+            decode(&[0xa2, 0x01, 0xf6, 0x01, 0xf6]),
+            Err(DecodeError::NonCanonicalMapOrder)
+        );
         assert_eq!(decode(&[0xf6, 0xf6]), Err(DecodeError::TrailingBytes));
     }
 }

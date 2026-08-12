@@ -7,7 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
-rp-protocol = { path = "../rp-protocol" }
+base64 = "0.22.1"
+ed25519-dalek = { version = "2.1.1", default-features = false, features = ["std"] }
+rp-protocol = { path = "../rp-protocol", version = "0.1.0" }
+rp-web-authn = { path = "../rp-web-authn", version = "0.0.0" }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 sha2 = "0.10.9"
 thiserror = "2.0.12"

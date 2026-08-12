@@ -52,7 +52,7 @@ impl FixtureBytes {
             self.state ^= self.state << 25;
             self.state ^= self.state >> 27;
             self.state = self.state.wrapping_mul(0x2545_F491_4F6C_DD1D);
-            *byte = self.state as u8;
+            *byte = self.state.to_le_bytes()[0];
         }
         result
     }

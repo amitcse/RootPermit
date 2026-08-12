@@ -7,8 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
-rp-protocol = { path = "../rp-protocol" }
+libc = "0.2.176"
+rp-protocol = { path = "../rp-protocol", version = "0.1.0" }
 thiserror = "2.0.12"
+rp-peercred = { path = "../rp-peercred", version = "0.0.0" }
 
 [lints]
 workspace = true

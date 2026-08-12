@@ -4,6 +4,8 @@
 //! surface accepts only one typed operation; successful parsing therefore
 //! reports broker unavailability rather than pretending that a request ran.
 
+#![allow(clippy::doc_markdown, clippy::missing_errors_doc)]
+
 use std::fmt;
 
 /// The only requester operation admitted by the initial CLI.
@@ -195,9 +197,9 @@ fn is_binary_package_name(value: &str) -> bool {
 fn is_operation_key(value: &str) -> bool {
     let bytes = value.as_bytes();
     (16..=128).contains(&bytes.len())
-        && bytes.iter().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_')
-        })
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_'))
 }
 
 fn is_safe_note(value: &str) -> bool {
@@ -207,8 +209,8 @@ fn is_safe_note(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_unavailable_json, broker_unavailable_json, invalid_arguments_json, parse_admin_command,
-        parse_error_json, parse_package_install, AdminCommand, ParseError,
+        AdminCommand, ParseError, admin_unavailable_json, broker_unavailable_json,
+        invalid_arguments_json, parse_admin_command, parse_error_json, parse_package_install,
     };
 
     fn arguments(values: &[&str]) -> Vec<String> {
@@ -230,7 +232,10 @@ mod tests {
 
         assert_eq!(request.package_name, "ffmpeg");
         assert_eq!(request.operation_key, "install-ffmpeg-01");
-        assert_eq!(request.note.as_deref(), Some("Needed for local transcoding"));
+        assert_eq!(
+            request.note.as_deref(),
+            Some("Needed for local transcoding")
+        );
     }
 
     #[test]
@@ -298,7 +303,11 @@ mod tests {
         for key in ["short-key", "contains.dot-123456", "contains/slash-1234"] {
             assert_eq!(
                 parse_package_install(&arguments(&[
-                    "package", "install", "ffmpeg", "--operation-key", key,
+                    "package",
+                    "install",
+                    "ffmpeg",
+                    "--operation-key",
+                    key,
                 ])),
                 Err(ParseError::InvalidOperationKey),
                 "{key}"
@@ -314,7 +323,7 @@ mod tests {
             "install",
             secret_like_input,
             "--operation-key",
-                "safe-key-12345678",
+            "safe-key-12345678",
         ]));
         assert_eq!(parsed, Err(ParseError::InvalidPackageName));
 

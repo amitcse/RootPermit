@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-rp-protocol = { path = "../rp-protocol" }
+rp-protocol = { path = "../rp-protocol", version = "0.1.0" }
 sha2 = "0.10.9"
 thiserror = "2.0.12"
 

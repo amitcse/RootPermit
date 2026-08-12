@@ -5,6 +5,7 @@
 //! service acknowledgement means package execution occurred.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::missing_errors_doc)]
 
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -53,15 +54,20 @@ impl ObjectKind {
     pub const fn permitted_in(self, direction: Direction) -> bool {
         matches!(
             (self, direction),
-            (Self::EnrollmentAcknowledgement, Direction::BrokerToService)
-                | (Self::Request, Direction::BrokerToService)
-                | (Self::LifecycleEvent, Direction::BrokerToService)
-                | (Self::Receipt, Direction::BrokerToService)
-                | (Self::KeysetAcknowledgement, Direction::BrokerToService)
-                | (Self::ServiceKeyset, Direction::ServiceToBroker)
-                | (Self::DecisionSubmission, Direction::ServiceToBroker)
-                | (Self::RevocationEvent, Direction::ServiceToBroker)
-                | (Self::ResyncRequest, Direction::ServiceToBroker)
+            (
+                Self::EnrollmentAcknowledgement
+                    | Self::Request
+                    | Self::LifecycleEvent
+                    | Self::Receipt
+                    | Self::KeysetAcknowledgement,
+                Direction::BrokerToService
+            ) | (
+                Self::ServiceKeyset
+                    | Self::DecisionSubmission
+                    | Self::RevocationEvent
+                    | Self::ResyncRequest,
+                Direction::ServiceToBroker
+            )
         )
     }
 }
@@ -91,7 +97,13 @@ impl OpaqueEnvelope {
         if payload.len() > MAX_OPAQUE_ENVELOPE_BYTES {
             return Err(RelayError::PayloadTooLarge);
         }
-        Ok(Self { envelope_id, direction, kind, idempotency_key, payload })
+        Ok(Self {
+            envelope_id,
+            direction,
+            kind,
+            idempotency_key,
+            payload,
+        })
     }
 }
 
@@ -116,26 +128,50 @@ pub struct RelaySpool {
 }
 
 impl RelaySpool {
-    pub fn enqueue(&mut self, envelope: OpaqueEnvelope, now_mono_ns: u64) -> Result<(), RelayError> {
+    pub fn enqueue(
+        &mut self,
+        envelope: OpaqueEnvelope,
+        now_mono_ns: u64,
+    ) -> Result<(), RelayError> {
         if self.entries.contains_key(&envelope.envelope_id) {
             return Err(RelayError::DuplicateEnvelopeId);
         }
-        self.entries.insert(envelope.envelope_id, SpoolEntry { envelope, attempts: 0, next_attempt_mono_ns: now_mono_ns });
+        self.entries.insert(
+            envelope.envelope_id,
+            SpoolEntry {
+                envelope,
+                attempts: 0,
+                next_attempt_mono_ns: now_mono_ns,
+            },
+        );
         Ok(())
     }
 
     /// Claims one ready envelope while retaining it durably for at-least-once
     /// delivery. Calling this again without an acknowledgement may redeliver it.
     pub fn next_delivery(&mut self, now_mono_ns: u64) -> Option<DeliveryAttempt> {
-        let (_, entry) = self.entries.iter_mut().find(|(_, entry)| entry.next_attempt_mono_ns <= now_mono_ns)?;
+        let (_, entry) = self
+            .entries
+            .iter_mut()
+            .find(|(_, entry)| entry.next_attempt_mono_ns <= now_mono_ns)?;
         entry.attempts = entry.attempts.saturating_add(1);
-        Some(DeliveryAttempt { envelope: entry.envelope.clone(), attempts: entry.attempts })
+        Some(DeliveryAttempt {
+            envelope: entry.envelope.clone(),
+            attempts: entry.attempts,
+        })
     }
 
     /// Authenticated acknowledgement removes exactly the matching retained
     /// object. A mismatched idempotency key must not delete a spool record.
-    pub fn acknowledge(&mut self, envelope_id: EnvelopeId, idempotency_key: [u8; 32]) -> Result<(), RelayError> {
-        let entry = self.entries.get(&envelope_id).ok_or(RelayError::UnknownEnvelope)?;
+    pub fn acknowledge(
+        &mut self,
+        envelope_id: EnvelopeId,
+        idempotency_key: [u8; 32],
+    ) -> Result<(), RelayError> {
+        let entry = self
+            .entries
+            .get(&envelope_id)
+            .ok_or(RelayError::UnknownEnvelope)?;
         if entry.envelope.idempotency_key != idempotency_key {
             return Err(RelayError::AcknowledgementMismatch);
         }
@@ -144,8 +180,15 @@ impl RelaySpool {
     }
 
     /// Leaves the envelope in the spool and schedules a bounded retry time.
-    pub fn retry_later(&mut self, envelope_id: EnvelopeId, next_attempt_mono_ns: u64) -> Result<(), RelayError> {
-        let entry = self.entries.get_mut(&envelope_id).ok_or(RelayError::UnknownEnvelope)?;
+    pub fn retry_later(
+        &mut self,
+        envelope_id: EnvelopeId,
+        next_attempt_mono_ns: u64,
+    ) -> Result<(), RelayError> {
+        let entry = self
+            .entries
+            .get_mut(&envelope_id)
+            .ok_or(RelayError::UnknownEnvelope)?;
         entry.next_attempt_mono_ns = next_attempt_mono_ns;
         Ok(())
     }
@@ -180,7 +223,7 @@ pub enum RelayError {
 /// Verified lifecycle metadata supplied by the service verifier after it has
 /// checked the broker signature. The relay itself must not construct this from
 /// an opaque payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedLifecycleEvent {
     pub sequence: u64,
     pub event_digest: [u8; 32],
@@ -211,7 +254,11 @@ impl ProjectionChain {
 
     #[must_use]
     pub fn next_sequence(&self) -> u64 {
-        if self.next_sequence == 0 { 1 } else { self.next_sequence }
+        if self.next_sequence == 0 {
+            1
+        } else {
+            self.next_sequence
+        }
     }
 
     pub fn ingest(&mut self, event: VerifiedLifecycleEvent) -> ProjectionResult {
@@ -224,7 +271,9 @@ impl ProjectionChain {
             self.next_sequence = expected.saturating_add(1);
             return ProjectionResult::Applied;
         }
-        if event.sequence < expected && self.applied.get(&event.sequence) == Some(&event.event_digest) {
+        if event.sequence < expected
+            && self.applied.get(&event.sequence) == Some(&event.event_digest)
+        {
             return ProjectionResult::Duplicate;
         }
         self.frozen_gap = true;
@@ -234,7 +283,10 @@ impl ProjectionChain {
     /// Replaces a frozen projection only with an independently verified, exact
     /// sequence beginning at one. Any duplicate digest conflict or gap remains
     /// frozen and triggers another resync request at the caller.
-    pub fn restore_contiguous(&mut self, events: impl IntoIterator<Item = VerifiedLifecycleEvent>) -> Result<(), RelayError> {
+    pub fn restore_contiguous(
+        &mut self,
+        events: impl IntoIterator<Item = VerifiedLifecycleEvent>,
+    ) -> Result<(), RelayError> {
         let mut candidate = Self::default();
         for event in events {
             if candidate.ingest(event) != ProjectionResult::Applied {
@@ -262,7 +314,10 @@ mod tests {
     }
 
     fn event(sequence: u64, digest: u8) -> VerifiedLifecycleEvent {
-        VerifiedLifecycleEvent { sequence, event_digest: [digest; 32] }
+        VerifiedLifecycleEvent {
+            sequence,
+            event_digest: [digest; 32],
+        }
     }
 
     #[test]
@@ -273,7 +328,10 @@ mod tests {
         assert_eq!(spool.next_delivery(9), None);
         assert_eq!(spool.next_delivery(10).unwrap().attempts, 1);
         assert_eq!(spool.next_delivery(10).unwrap().attempts, 2);
-        assert_eq!(spool.acknowledge(queued.envelope_id, [2; 32]), Err(RelayError::AcknowledgementMismatch));
+        assert_eq!(
+            spool.acknowledge(queued.envelope_id, [2; 32]),
+            Err(RelayError::AcknowledgementMismatch)
+        );
         assert_eq!(spool.len(), 1);
         spool.acknowledge(queued.envelope_id, [1; 32]).unwrap();
         assert!(spool.is_empty());
@@ -282,26 +340,39 @@ mod tests {
     #[test]
     fn invalid_direction_and_oversize_payload_never_enter_the_spool() {
         assert_eq!(
-            OpaqueEnvelope::new(EnvelopeId::new([1; 16]), Direction::ServiceToBroker, ObjectKind::Receipt, [1; 32], vec![]),
+            OpaqueEnvelope::new(
+                EnvelopeId::new([1; 16]),
+                Direction::ServiceToBroker,
+                ObjectKind::Receipt,
+                [1; 32],
+                vec![]
+            ),
             Err(RelayError::InvalidDirection)
         );
         assert_eq!(
             OpaqueEnvelope::new(
-                EnvelopeId::new([1; 16]), Direction::BrokerToService, ObjectKind::Receipt, [1; 32], vec![0; MAX_OPAQUE_ENVELOPE_BYTES + 1]
+                EnvelopeId::new([1; 16]),
+                Direction::BrokerToService,
+                ObjectKind::Receipt,
+                [1; 32],
+                vec![0; MAX_OPAQUE_ENVELOPE_BYTES + 1]
             ),
             Err(RelayError::PayloadTooLarge)
         );
     }
 
     #[test]
-    fn projection_freezes_on_reorder_or_conflicting_duplicate_and_restores_only_contiguous_history() {
+    fn projection_freezes_on_reorder_or_conflicting_duplicate_and_restores_only_contiguous_history()
+    {
         let mut projection = ProjectionChain::default();
         assert_eq!(projection.ingest(event(1, 1)), ProjectionResult::Applied);
         assert_eq!(projection.ingest(event(1, 1)), ProjectionResult::Duplicate);
         assert_eq!(projection.ingest(event(3, 3)), ProjectionResult::FrozenGap);
         assert!(projection.is_frozen());
         assert_eq!(projection.ingest(event(2, 2)), ProjectionResult::FrozenGap);
-        projection.restore_contiguous([event(1, 1), event(2, 2), event(3, 3)]).unwrap();
+        projection
+            .restore_contiguous([event(1, 1), event(2, 2), event(3, 3)])
+            .unwrap();
         assert!(!projection.is_frozen());
         assert_eq!(projection.next_sequence(), 4);
         assert_eq!(projection.ingest(event(2, 9)), ProjectionResult::FrozenGap);

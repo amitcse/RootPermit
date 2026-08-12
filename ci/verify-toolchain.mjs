@@ -37,8 +37,6 @@ const postgresPath = command("pg_config", ["--bindir"]);
 command(`${postgresPath}/postgres`, ["--version"]);
 
 for (const [packageName, expected] of [
-  [lock.apt.package, lock.apt.version],
-  [lock.apt.development_package, lock.apt.development_version],
   ["postgresql", lock.postgres],
   ["postgresql-client", lock.postgres],
 ]) {

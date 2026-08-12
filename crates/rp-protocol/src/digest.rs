@@ -1,4 +1,4 @@
-use crate::{cbor, CborValue, EncodeError};
+use crate::{CborValue, EncodeError, cbor};
 use sha2::{Digest as _, Sha256};
 
 /// A SHA-256 value used by the RootPermit protocol.

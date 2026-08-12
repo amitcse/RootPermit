@@ -19,6 +19,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v2
+        env:
+          # gitleaks v8.24 requires the PR token explicitly for diff scans.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   dependencies:
     runs-on: ubuntu-24.04

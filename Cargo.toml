@@ -4,6 +4,7 @@ members = [
   "crates/rp-web-authn",
   "crates/rp-broker-core",
   "crates/rp-broker-api",
+  "crates/rp-peercred",
   "crates/rp-relay",
   "crates/rp-cli",
   "crates/rp-testkit",
