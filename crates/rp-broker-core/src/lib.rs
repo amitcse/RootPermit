@@ -497,12 +497,16 @@ impl BrokerSigningKey {
             file.write_all(&seed)?;
             file.sync_all()?;
         }
+        Ok(Self::from_seed(seed))
+    }
+
+    fn from_seed(seed: [u8; 32]) -> Self {
         let key = SigningKey::from_bytes(&seed);
         let digest: Digest = Sha256::digest(key.verifying_key().as_bytes()).into();
-        Ok(Self {
+        Self {
             key,
             kid: digest[..16].to_vec(),
-        })
+        }
     }
 
     #[must_use]
@@ -2274,6 +2278,10 @@ mod tests {
         PackageAllowlist::new([PackageName::parse(package).unwrap()])
     }
 
+    fn test_signer() -> BrokerSigningKey {
+        BrokerSigningKey::from_seed([7; 32])
+    }
+
     fn pending_context() -> PendingRequestContext {
         PendingRequestContext {
             created_utc: 10,
@@ -2467,13 +2475,7 @@ mod tests {
 
     #[test]
     fn terminal_transition_writes_exactly_one_signed_durable_receipt() {
-        let key_path = std::env::temp_dir().join(format!(
-            "rootpermit-m2-key-{}-{}.seed",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        let _ = std::fs::remove_file(&key_path);
-        let signer = BrokerSigningKey::load_or_create(&key_path).unwrap();
+        let signer = test_signer();
         let mut store = BrokerStore::in_memory().unwrap();
         store.initialize_identity(&signer).unwrap();
         let initial = request(REQUEST_A, 1000, KEY_A, "ffmpeg");
@@ -2507,18 +2509,11 @@ mod tests {
                 actual: RequestState::Denied
             })
         ));
-        std::fs::remove_file(key_path).unwrap();
     }
 
     #[test]
     fn recovery_reconciliation_requires_evidence_and_cannot_restart_execution() {
-        let key_path = std::env::temp_dir().join(format!(
-            "rootpermit-m2-reconcile-{}-{}.seed",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        let _ = std::fs::remove_file(&key_path);
-        let signer = BrokerSigningKey::load_or_create(&key_path).unwrap();
+        let signer = test_signer();
         let mut store = BrokerStore::in_memory().unwrap();
         store.initialize_identity(&signer).unwrap();
         let initial = request(REQUEST_A, 1000, KEY_A, "ffmpeg");
@@ -2578,18 +2573,11 @@ mod tests {
             ),
             Err(BrokerError::InvalidTransition { .. })
         ));
-        std::fs::remove_file(key_path).unwrap();
     }
 
     #[test]
     fn signed_request_and_webauthn_deny_bind_one_durable_terminal_receipt() {
-        let key_path = std::env::temp_dir().join(format!(
-            "rootpermit-m2-binding-{}-{}.seed",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        let _ = std::fs::remove_file(&key_path);
-        let signer = BrokerSigningKey::load_or_create(&key_path).unwrap();
+        let signer = test_signer();
         let mut store = BrokerStore::in_memory().unwrap();
         store.initialize_identity(&signer).unwrap();
         store
@@ -2648,7 +2636,6 @@ mod tests {
             store.receipt(&initial.request_id).unwrap(),
             Some(receipt_cose)
         );
-        std::fs::remove_file(key_path).unwrap();
     }
 
     #[test]
@@ -2742,9 +2729,7 @@ mod tests {
             std::thread::current().name().unwrap_or("test")
         ));
         let _ = std::fs::remove_file(&path);
-        let key_path = path.with_extension("seed");
-        let _ = std::fs::remove_file(&key_path);
-        let signer = BrokerSigningKey::load_or_create(&key_path).unwrap();
+        let signer = test_signer();
         let initial = request(REQUEST_A, 1000, KEY_A, "ffmpeg");
         {
             let mut store = BrokerStore::open(&path).unwrap();
@@ -2768,7 +2753,6 @@ mod tests {
             RequestState::Expired
         );
         std::fs::remove_file(path).unwrap();
-        std::fs::remove_file(key_path).unwrap();
     }
 
     #[test]
