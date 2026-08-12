@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "runner": {
+    "os": "ubuntu-24.04",
+    "architecture": "amd64"
+  },
+  "rust": "1.89.0",
+  "node": "24.14.0",
+  "cmake": "3.31.6",
+  "postgres": "16+257build1",
+  "apt": {
+    "package": "apt",
+    "version": "2.7.14build2",
+    "development_package": "libapt-pkg-dev",
+    "development_version": "2.7.14build2"
+  }
+}

@@ -4,13 +4,51 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_candidate:
+        description: Run the release-candidate lane selection policy.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
-  rust:
-    name: Rust format, lint, and tests
+  lanes:
+    name: Determine applicable evidence lanes
+    runs-on: ubuntu-24.04
+    outputs:
+      fast: ${{ steps.select.outputs.fast }}
+      postgres: ${{ steps.select.outputs.postgres }}
+      privileged: ${{ steps.select.outputs.privileged }}
+      release: ${{ steps.select.outputs.release }}
+      m4: ${{ steps.select.outputs.m4 }}
+      m5: ${{ steps.select.outputs.m5 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: select
+        env:
+          ROOTPERMIT_RELEASE_CANDIDATE: ${{ inputs.release_candidate && '1' || '0' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git diff --name-only "origin/${{ github.base_ref }}...HEAD" > /tmp/changed-paths
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            git diff --name-only HEAD^ HEAD > /tmp/changed-paths
+          else
+            git ls-files > /tmp/changed-paths
+          fi
+          node ci/lane-selection.mjs --stdin < /tmp/changed-paths >> "$GITHUB_OUTPUT"
+
+  fast-pr:
+    name: Fast PR evidence
+    needs: lanes
+    if: needs.lanes.outputs.fast == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -18,35 +56,27 @@ jobs:
         with:
           toolchain: 1.89.0
           components: rustfmt, clippy
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-
-  helper-contract:
-    name: APT helper startup-contract harness
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - run: cmake -S helper/apt-helper -B build/apt-helper -DBUILD_TESTING=ON
-      - run: cmake --build build/apt-helper --parallel
-      - run: ctest --test-dir build/apt-helper --output-on-failure
-
-  node:
-    name: TypeScript workspace checks
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: package-lock.json
+      - uses: ./ci/setup-toolchain
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cmake -S helper/apt-helper -B build/apt-helper -DBUILD_TESTING=ON
+      - run: cmake --build build/apt-helper --parallel
+      - run: ctest --test-dir build/apt-helper --output-on-failure
       - run: npm ci
+      - run: npm run ci:contract
       - run: npm run check
       - run: node --test service/migrations/test/*.test.mjs
 
-  postgres-tenant-isolation:
-    name: PostgreSQL tenant-isolation migration gate
+  postgres-integration-pr:
+    name: PostgreSQL integration PR
+    needs: lanes
+    if: needs.lanes.outputs.postgres == 'true'
     runs-on: ubuntu-24.04
     services:
       postgres:
@@ -70,26 +100,36 @@ jobs:
       PGPASSWORD: rootpermit_ci_password
     steps:
       - uses: actions/checkout@v4
-      - name: Install the PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends postgresql-client
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89.0
+      - uses: ./ci/setup-toolchain
       - name: Apply hosted schema migrations
         run: |
           for migration in service/migrations/[0-9]*.sql; do
             psql --no-psqlrc --set ON_ERROR_STOP=1 --file "$migration"
           done
       - name: Prove live tenant RLS and transaction context reset
-        run: |
-          psql --no-psqlrc --set ON_ERROR_STOP=1 \
-            --file service/migrations/test/live-tenant-isolation.sql
+        run: psql --no-psqlrc --set ON_ERROR_STOP=1 --file service/migrations/test/live-tenant-isolation.sql
 
-  fixture-contract:
-    name: Fixture contract
+  privileged-preflight-pr:
+    name: Privileged fixture preflight
+    needs: lanes
+    if: needs.lanes.outputs.privileged == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Assert only declared contract manifests exist in M0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: node ci/validate-fixtures.mjs fixtures
+      - run: node --test ci/lane-selection.test.mjs ci/fixture-validation.test.mjs
+      - name: State the required follow-up evidence lane
         run: |
-          test "$(find fixtures -name manifest.json -type f | wc -l)" -eq 2
-          grep -R '"status": "contract-only"' fixtures/*/manifest.json
+          echo "M4-affecting pull requests require the privileged-nightly fixture evidence before release-candidate promotion."

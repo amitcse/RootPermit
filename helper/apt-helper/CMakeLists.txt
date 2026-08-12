@@ -4,18 +4,19 @@ cmake_minimum_required(VERSION 3.24)
 # implementation only after the sealed-plan evidence gate has passed.
 project(rootpermit_apt_helper LANGUAGES CXX)
 
-option(RP_APT_HELPER_REQUIRE_LIBAPT
-  "Check that the pinned libapt-pkg development package is available" OFF)
+option(RP_APT_HELPER_BUILD_M4_TARGETS
+  "Enable the libapt-pkg-dependent targets that are only valid for M4 evidence" OFF)
 
 set(RP_APT_HELPER_LIBAPT_VERSION "2.9" CACHE STRING
   "Minimum libapt-pkg major.minor declaration for the Ubuntu reference image")
 
-find_path(RP_APT_PKG_INCLUDE_DIR apt-pkg/apt-pkgconfig.h)
-if(RP_APT_HELPER_REQUIRE_LIBAPT)
-  if(NOT RP_APT_PKG_INCLUDE_DIR)
-    message(FATAL_ERROR
-      "libapt-pkg-dev is required when RP_APT_HELPER_REQUIRE_LIBAPT=ON")
-  endif()
+# The M0/M1 startup-contract library is deliberately independent of libapt-pkg.
+# Requiring headers for every CMake invocation would let an unavailable M4
+# toolchain turn a boundary-only build into a silently skipped test.  The first
+# target that is allowed to include or link libapt-pkg must opt into this mode.
+if(RP_APT_HELPER_BUILD_M4_TARGETS)
+  find_path(RP_APT_PKG_INCLUDE_DIR apt-pkg/apt-pkgconfig.h REQUIRED)
+  find_library(RP_APT_PKG_LIBRARY NAMES apt-pkg REQUIRED)
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -26,12 +27,6 @@ add_library(rootpermit_apt_helper_contract STATIC
   src/startup_contract.cpp
 )
 target_include_directories(rootpermit_apt_helper_contract PUBLIC include)
-if(RP_APT_PKG_INCLUDE_DIR)
-  # Discovery records a build capability only. The current helper boundary
-  # intentionally does not include or link libapt-pkg until M4 evidence exists.
-  target_compile_definitions(rootpermit_apt_helper_contract PUBLIC
-    RP_APT_HELPER_HAS_LIBAPT_PKG=1)
-endif()
 target_compile_options(rootpermit_apt_helper_contract PRIVATE
   -Wall -Wextra -Wpedantic -Werror)
 
@@ -47,4 +42,15 @@ if(BUILD_TESTING)
     -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME rootpermit-apt-helper-contract
     COMMAND rootpermit-apt-helper-contract-test)
+endif()
+
+if(RP_APT_HELPER_BUILD_M4_TARGETS)
+  # This sentinel keeps the dependency contract executable before M4's private
+  # simulation target exists.  It links the exact development library, but does
+  # not grant an execution path or claim the M4 evidence gate has passed.
+  add_library(rootpermit_apt_helper_m4_toolchain INTERFACE)
+  target_include_directories(rootpermit_apt_helper_m4_toolchain INTERFACE
+    "${RP_APT_PKG_INCLUDE_DIR}")
+  target_link_libraries(rootpermit_apt_helper_m4_toolchain INTERFACE
+    "${RP_APT_PKG_LIBRARY}")
 endif()

@@ -1,11 +1,34 @@
 {
   "schema_version": 1,
-  "fixture_id": "ubuntu-amd64-m4-contract",
-  "status": "contract-only",
+  "fixture_id": "ubuntu-amd64-m4-20260720",
+  "status": "provisioning-ready",
   "platform": {
     "os": "Ubuntu Server",
     "release": "26.04 LTS",
     "architecture": "amd64"
   },
-  "purpose": "Contract for the Ubuntu AMD64 sealed-plan evidence fixture; not runnable until M4 inputs are pinned."
+  "purpose": "Pinned Ubuntu AMD64 base for M4 fixture provisioning. It does not authorize an APT execution test until sealed inputs and evidence are committed.",
+  "image": {
+    "locator": "https://cloud-images.ubuntu.com/resolute/20260720/resolute-server-cloudimg-amd64.img",
+    "sha256": "117816726abbdefc5ef3e38902e81a76f1c76c3610e709999d0885f9d5d9b477",
+    "format": "qcow2",
+    "publisher_checksum_url": "https://cloud-images.ubuntu.com/resolute/20260720/SHA256SUMS"
+  },
+  "runtime": {
+    "kernel": "7.0.0-28-generic",
+    "apt_version": "3.2.0",
+    "dpkg_version": "1.23.7ubuntu1"
+  },
+  "apt_repositories": [
+    {
+      "uri": "https://snapshot.ubuntu.com/ubuntu/20260720T000000Z",
+      "suite": "resolute",
+      "components": ["main", "universe"],
+      "snapshot_id": "20260720T000000Z"
+    }
+  ],
+  "artifact_retention": {
+    "path": "artifacts/privileged/ubuntu-amd64-m4-20260720",
+    "retention_days": 30
+  }
 }

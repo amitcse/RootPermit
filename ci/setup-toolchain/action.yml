@@ -1,0 +1,12 @@
+name: RootPermit pinned evidence toolchain
+description: Install and fail-closed verify the P0 Linux build and evidence prerequisites.
+
+runs:
+  using: composite
+  steps:
+    - name: Install pinned system prerequisites
+      shell: bash
+      run: sudo bash ci/install-prerequisites.sh
+    - name: Verify pinned toolchain
+      shell: bash
+      run: node ci/verify-toolchain.mjs

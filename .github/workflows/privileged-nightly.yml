@@ -1,0 +1,38 @@
+name: Privileged nightly fixture evidence
+
+on:
+  schedule:
+    - cron: '31 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-amd64-provision:
+    name: Ubuntu AMD64 checksum-pinned fixture provisioning
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: Provision and checksum verify isolated fixture input
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/privileged
+          RP_PRIVILEGED_FIXTURE_RUNNER=1 \
+            bash ci/provision-privileged-fixture.sh fixtures/ubuntu-amd64/manifest.json \
+              artifacts/privileged 2>&1 | tee artifacts/privileged/provisioning.log
+      - name: Retain privileged fixture evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: privileged-ubuntu-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/privileged
+          retention-days: 30
+          if-no-files-found: warn
