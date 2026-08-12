@@ -58,6 +58,11 @@ work. They are blocking security claims, not implementation details.
 
 ## Implementation status (2026-08-12)
 
+The implementation-level ticket breakdown, evidence ownership, parallel lanes,
+and merge bands for the remaining M2–M5 work live in
+[`docs/m2-m5-execution-backlog.md`](m2-m5-execution-backlog.md). This plan
+remains the high-level dependency and release-gate source of truth.
+
 | Milestone | Implemented in this repository | Evidence still required before the milestone can be claimed complete |
 |---|---|---|
 | M1 protocol | Strict CBOR schema/digest primitives and a positive/negative vector harness. | Pinned Rust toolchain execution, COSE/WebAuthn implementation, and multi-language vector consumers. |
