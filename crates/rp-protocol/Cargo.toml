@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-base64 = "0.22.1"
+base64 = "0.23.1"
 ed25519-dalek = { version = "2.1.1", default-features = false, features = ["std"] }
 sha2 = "0.10.9"
 thiserror = "2.0.12"
