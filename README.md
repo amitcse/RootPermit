@@ -12,10 +12,12 @@ or APT flags.
 
 ## Status
 
-Implementation has begun with the repository foundation and protocol
-conformance work. M4 (real APT execution) and M5 (multi-tenant hosted alpha)
-are evidence gates, not feature flags. They are not complete until their
-pinned-VM and PostgreSQL adversarial suites have passed.
+The M3 disposable single-tenant approval path is implemented: a root-created
+device pairing, hosted account session, verified approval presentation,
+WebAuthn decision relay, revocation quarantine, and fake-execution evidence.
+It does not perform real package installation or make a multi-tenant hosted
+alpha claim. M4 (real APT execution) and M5 (multi-tenant hosted alpha) remain
+evidence gates until their pinned-VM and PostgreSQL adversarial suites pass.
 
 ## Layout
 
