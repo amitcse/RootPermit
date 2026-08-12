@@ -8,6 +8,11 @@
 //! RP ID, ES256 credential, user verification, and broker-pinned credential.
 
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::doc_markdown,
+    clippy::missing_errors_doc,
+    clippy::result_unit_err
+)]
 
 use rp_protocol::{ApprovalContext, DecisionSubmission, SchemaError};
 use sha2::{Digest as _, Sha256};
@@ -128,7 +133,9 @@ pub fn verify_submission(
         return Err(WebAuthnError::UnsupportedAlgorithm);
     }
 
-    let assertion = verifier.verify_assertion(submission, pinned).map_err(|()| WebAuthnError::AssertionRejected)?;
+    let assertion = verifier
+        .verify_assertion(submission, pinned)
+        .map_err(|()| WebAuthnError::AssertionRejected)?;
     if assertion.credential_id != submission.credential_id {
         return Err(WebAuthnError::CredentialMismatch);
     }
@@ -171,51 +178,98 @@ mod tests {
     use super::*;
     use rp_protocol::{Decision, DeviceId, Nonce, RequestId};
 
-    struct FakeVerifier { assertion: LibraryVerifiedAssertion }
+    struct FakeVerifier {
+        assertion: LibraryVerifiedAssertion,
+    }
 
     impl ReviewedWebAuthnVerifier for FakeVerifier {
-        fn verify_assertion(&self, _: &DecisionSubmission, _: &PinnedCredential) -> Result<LibraryVerifiedAssertion, ()> {
+        fn verify_assertion(
+            &self,
+            _: &DecisionSubmission,
+            _: &PinnedCredential,
+        ) -> Result<LibraryVerifiedAssertion, ()> {
             Ok(self.assertion.clone())
         }
     }
 
     fn context() -> ApprovalContext {
         ApprovalContext {
-            request_id: RequestId::new([1; 16]), device_id: DeviceId::new([2; 16]), broker_epoch: 3,
-            request_digest: [4; 32], generation: 5, nonce: Nonce::new([6; 32]),
-            rp_id: "rootpermit.example".into(), origin: "https://rootpermit.example".into(),
-            decision: Decision::Approve, expires_utc: 7,
+            request_id: RequestId::new([1; 16]),
+            device_id: DeviceId::new([2; 16]),
+            broker_epoch: 3,
+            request_digest: [4; 32],
+            generation: 5,
+            nonce: Nonce::new([6; 32]),
+            rp_id: "rootpermit.example".into(),
+            origin: "https://rootpermit.example".into(),
+            decision: Decision::Approve,
+            expires_utc: 7,
         }
     }
 
     fn submission(context: ApprovalContext) -> DecisionSubmission {
         DecisionSubmission {
-            approval_context: context, credential_id: vec![8], authenticator_data: vec![1],
-            client_data_json: br#"{}"#.to_vec(), signature: vec![2], user_handle: None,
+            approval_context: context,
+            credential_id: vec![8],
+            authenticator_data: vec![1],
+            client_data_json: br"{}".to_vec(),
+            signature: vec![2],
+            user_handle: None,
         }
     }
 
     fn credential() -> PinnedCredential {
-        PinnedCredential { credential_id: vec![8], generation: 5, quarantined: false, cose_algorithm: ES256_ALGORITHM, previous_sign_count: 4 }
+        PinnedCredential {
+            credential_id: vec![8],
+            generation: 5,
+            quarantined: false,
+            cose_algorithm: ES256_ALGORITHM,
+            previous_sign_count: 4,
+        }
     }
 
     fn assertion(context: &ApprovalContext) -> LibraryVerifiedAssertion {
         LibraryVerifiedAssertion {
-            credential_id: vec![8], client_data_type: "webauthn.get".into(), challenge: context.webauthn_challenge().unwrap().to_vec(),
-            origin: context.origin.clone(), rp_id_hash: Sha256::digest(context.rp_id.as_bytes()).into(),
-            user_present: true, user_verified: true, cose_algorithm: ES256_ALGORITHM, sign_count: 5,
+            credential_id: vec![8],
+            client_data_type: "webauthn.get".into(),
+            challenge: context.webauthn_challenge().unwrap().to_vec(),
+            origin: context.origin.clone(),
+            rp_id_hash: Sha256::digest(context.rp_id.as_bytes()).into(),
+            user_present: true,
+            user_verified: true,
+            cose_algorithm: ES256_ALGORITHM,
+            sign_count: 5,
         }
     }
 
     #[test]
     fn accepts_exact_context_and_reports_counter_anomaly_without_denying() {
         let context = context();
-        let result = verify_submission(&FakeVerifier { assertion: assertion(&context) }, &context, &[credential()], &submission(context.clone())).unwrap();
+        let result = verify_submission(
+            &FakeVerifier {
+                assertion: assertion(&context),
+            },
+            &context,
+            &[credential()],
+            &submission(context.clone()),
+        )
+        .unwrap();
         assert_eq!(result.decision, Decision::Approve);
         assert!(!result.counter_anomaly);
         let mut anomalous = assertion(&context);
         anomalous.sign_count = 4;
-        assert!(verify_submission(&FakeVerifier { assertion: anomalous }, &context, &[credential()], &submission(context.clone())).unwrap().counter_anomaly);
+        assert!(
+            verify_submission(
+                &FakeVerifier {
+                    assertion: anomalous
+                },
+                &context,
+                &[credential()],
+                &submission(context.clone())
+            )
+            .unwrap()
+            .counter_anomaly
+        );
     }
 
     #[test]
@@ -223,10 +277,38 @@ mod tests {
         let context = context();
         let mut bad_origin = assertion(&context);
         bad_origin.origin = "https://attacker.example".into();
-        assert_eq!(verify_submission(&FakeVerifier { assertion: bad_origin }, &context, &[credential()], &submission(context.clone())), Err(WebAuthnError::OriginMismatch));
+        assert_eq!(
+            verify_submission(
+                &FakeVerifier {
+                    assertion: bad_origin
+                },
+                &context,
+                &[credential()],
+                &submission(context.clone())
+            ),
+            Err(WebAuthnError::OriginMismatch)
+        );
         let mut no_uv = assertion(&context);
         no_uv.user_verified = false;
-        assert_eq!(verify_submission(&FakeVerifier { assertion: no_uv }, &context, &[credential()], &submission(context.clone())), Err(WebAuthnError::UserVerificationMissing));
-        assert_eq!(verify_submission(&FakeVerifier { assertion: assertion(&context) }, &context, &[], &submission(context.clone())), Err(WebAuthnError::CredentialNotPinned));
+        assert_eq!(
+            verify_submission(
+                &FakeVerifier { assertion: no_uv },
+                &context,
+                &[credential()],
+                &submission(context.clone())
+            ),
+            Err(WebAuthnError::UserVerificationMissing)
+        );
+        assert_eq!(
+            verify_submission(
+                &FakeVerifier {
+                    assertion: assertion(&context)
+                },
+                &context,
+                &[],
+                &submission(context.clone())
+            ),
+            Err(WebAuthnError::CredentialNotPinned)
+        );
     }
 }

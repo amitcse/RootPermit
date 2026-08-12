@@ -1,19 +1,22 @@
 //! Local RootPermit broker RPC framing and schemas.
 //!
 //! Each `SOCK_SEQPACKET` packet carries exactly one four-byte big-endian length
-//! prefix followed by one deterministic-CBOR message.  Packet boundaries are a
-//! transport property, not a license to accept partial or concatenated frames.
+//! prefix followed by one deterministic-CBOR message. Packet boundaries are a
+//! security property: partial, concatenated, and trailing frames are rejected.
 //! The server must obtain `SO_PEERCRED` independently; no message field carries
 //! or overrides a caller UID, GID, PID, or authorization scope.
 
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::doc_markdown,
+    clippy::missing_errors_doc,
+    clippy::must_use_candidate
+)]
 
 use rp_protocol::{CborValue, DecodeError, EncodeError, VERSION, decode, encode};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -22,13 +25,60 @@ use thiserror::Error;
 pub const MAX_FRAME_PAYLOAD_BYTES: usize = 65_536;
 pub const FRAME_LENGTH_BYTES: usize = 4;
 
-/// Root-owned local socket acceptor. Framing stays packet-shaped even though
-/// the portable Rust adapter uses a stream socket: the declared length is read
-/// exactly and trailing bytes remain for the next request rather than being
-/// interpreted as part of the current CBOR object.
+/// Root-owned local `SOCK_SEQPACKET` acceptor.
 pub struct LocalSocket {
-    listener: UnixListener,
+    listener: rp_peercred::SeqPacketListener,
     path: PathBuf,
+}
+
+/// Separate root-only administration listener. It is deliberately a distinct
+/// filesystem endpoint and protocol namespace: requester peers can never turn
+/// a method number into an administrative operation.
+pub struct AdminSocket {
+    listener: rp_peercred::SeqPacketListener,
+    path: PathBuf,
+}
+
+impl AdminSocket {
+    /// Binds a root-only administrative socket. Group-readable modes are not
+    /// accepted because they would turn membership management into authority.
+    pub fn bind(path: &Path) -> std::io::Result<Self> {
+        validate_socket_parent(path)?;
+        match fs::symlink_metadata(path) {
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "socket path exists",
+                ));
+            }
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+            Err(_) => {}
+        }
+        let listener = rp_peercred::SeqPacketListener::bind(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        Ok(Self {
+            listener,
+            path: path.to_owned(),
+        })
+    }
+
+    /// Accepts only a kernel-authenticated root peer.
+    pub fn accept(&self) -> std::io::Result<rp_peercred::SeqPacketConnection> {
+        let stream = self.listener.accept()?;
+        if rp_peercred::get(&stream)?.uid != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "admin socket requires root",
+            ));
+        }
+        Ok(stream)
+    }
+}
+
+impl Drop for AdminSocket {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 impl LocalSocket {
@@ -41,6 +91,7 @@ impl LocalSocket {
                 "unsafe socket mode",
             ));
         }
+        validate_socket_parent(path)?;
         match fs::symlink_metadata(path) {
             Ok(_) => {
                 return Err(std::io::Error::new(
@@ -51,7 +102,7 @@ impl LocalSocket {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
             Err(_) => {}
         }
-        let listener = UnixListener::bind(path)?;
+        let listener = rp_peercred::SeqPacketListener::bind(path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
         Ok(Self {
             listener,
@@ -60,8 +111,8 @@ impl LocalSocket {
     }
 
     /// Accepts a connection and derives identity only from `SO_PEERCRED`.
-    pub fn accept(&self) -> std::io::Result<(UnixStream, PeerCredentials)> {
-        let (stream, _) = self.listener.accept()?;
+    pub fn accept(&self) -> std::io::Result<(rp_peercred::SeqPacketConnection, PeerCredentials)> {
+        let stream = self.listener.accept()?;
         let credentials = rp_peercred::get(&stream)?;
         Ok((
             stream,
@@ -76,6 +127,23 @@ impl Drop for LocalSocket {
     }
 }
 
+fn validate_socket_parent(path: &Path) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket path has no parent",
+        )
+    })?;
+    let metadata = fs::metadata(parent)?;
+    if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "socket parent is not root-owned and private",
+        ));
+    }
+    Ok(())
+}
+
 /// Reads one bounded length-prefixed RPC frame without trusting peer sizes.
 #[derive(Debug, Error)]
 pub enum SocketError {
@@ -87,23 +155,40 @@ pub enum SocketError {
     OversizePayload,
 }
 
-pub fn read_frame(stream: &mut UnixStream) -> Result<RpcMessage, SocketError> {
-    let mut prefix = [0_u8; FRAME_LENGTH_BYTES];
-    stream.read_exact(&mut prefix)?;
-    let length =
-        usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| SocketError::OversizePayload)?;
-    if length > MAX_FRAME_PAYLOAD_BYTES {
+pub fn read_frame(
+    stream: &mut rp_peercred::SeqPacketConnection,
+) -> Result<RpcMessage, SocketError> {
+    let mut packet = vec![0; FRAME_LENGTH_BYTES + MAX_FRAME_PAYLOAD_BYTES];
+    let received = stream.receive(&mut packet)?;
+    if received < FRAME_LENGTH_BYTES {
+        return Err(FrameError::TooShort.into());
+    }
+    let declared = usize::try_from(u32::from_be_bytes(
+        packet[..FRAME_LENGTH_BYTES]
+            .try_into()
+            .map_err(|_| FrameError::TooShort)?,
+    ))
+    .map_err(|_| SocketError::OversizePayload)?;
+    if declared > MAX_FRAME_PAYLOAD_BYTES {
         return Err(SocketError::OversizePayload);
     }
-    let mut packet = vec![0; FRAME_LENGTH_BYTES + length];
-    packet[..FRAME_LENGTH_BYTES].copy_from_slice(&prefix);
-    stream.read_exact(&mut packet[FRAME_LENGTH_BYTES..])?;
-    Ok(RpcMessage::decode_frame(&packet)?)
+    let expected = FRAME_LENGTH_BYTES + declared;
+    if received != expected {
+        return Err(FrameError::LengthMismatch {
+            declared,
+            actual: received - FRAME_LENGTH_BYTES,
+        }
+        .into());
+    }
+    RpcMessage::decode_frame(&packet[..received]).map_err(SocketError::from)
 }
 
 /// Writes one complete bounded frame.
-pub fn write_frame(stream: &mut UnixStream, message: &RpcMessage) -> Result<(), SocketError> {
-    stream.write_all(&message.encode_frame()?)?;
+pub fn write_frame(
+    stream: &mut rp_peercred::SeqPacketConnection,
+    message: &RpcMessage,
+) -> Result<(), SocketError> {
+    stream.send(&message.encode_frame()?)?;
     Ok(())
 }
 
@@ -129,17 +214,6 @@ impl PeerCredentials {
     }
 }
 
-/// Applies the part of the local authorization contract that does not require
-/// a database lookup. Object ownership is checked separately through
-/// `can_access_owned_request`; callers must map any failure to the generic
-/// visibility error so a foreign request is never enumerable.
-pub fn authorize_method(peer: PeerCredentials, method: Method) -> Result<(), ErrorCode> {
-    if method.is_root_only() && !peer.is_root() {
-        return Err(ErrorCode::NotAllowed);
-    }
-    Ok(())
-}
-
 /// Returns whether a peer can access an object owned by `owner_uid`. Root is
 /// the only cross-UID reader. This predicate intentionally returns no reason.
 #[must_use]
@@ -153,12 +227,6 @@ pub const fn concealed_visibility_error() -> ErrorCode {
     ErrorCode::NotFoundOrNotAuthorized
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AccessClass {
-    Peer,
-    RootOnly,
-}
-
 /// The closed v1 local-RPC method enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -168,37 +236,22 @@ pub enum Method {
     ListRequests = 3,
     CancelRequest = 4,
     GetReceipt = 5,
-    RootStartPairing = 100,
-    RootChangeCredentials = 101,
-    RootReconcile = 102,
-    RootExport = 103,
-    RootPurge = 104,
-    RootUnenroll = 105,
+}
+
+/// Closed namespace carried only on [`AdminSocket`]. These values cannot be
+/// decoded by the requester protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum AdminMethod {
+    StartPairing = 1,
+    ChangeCredentials = 2,
+    Reconcile = 3,
+    Export = 4,
+    Purge = 5,
+    Unenroll = 6,
 }
 
 impl Method {
-    #[must_use]
-    pub const fn access_class(self) -> AccessClass {
-        match self {
-            Self::SubmitPackageInstall
-            | Self::GetRequest
-            | Self::ListRequests
-            | Self::CancelRequest
-            | Self::GetReceipt => AccessClass::Peer,
-            Self::RootStartPairing
-            | Self::RootChangeCredentials
-            | Self::RootReconcile
-            | Self::RootExport
-            | Self::RootPurge
-            | Self::RootUnenroll => AccessClass::RootOnly,
-        }
-    }
-
-    #[must_use]
-    pub const fn is_root_only(self) -> bool {
-        matches!(self.access_class(), AccessClass::RootOnly)
-    }
-
     const fn code(self) -> u64 {
         match self {
             Self::SubmitPackageInstall => 1,
@@ -206,12 +259,6 @@ impl Method {
             Self::ListRequests => 3,
             Self::CancelRequest => 4,
             Self::GetReceipt => 5,
-            Self::RootStartPairing => 100,
-            Self::RootChangeCredentials => 101,
-            Self::RootReconcile => 102,
-            Self::RootExport => 103,
-            Self::RootPurge => 104,
-            Self::RootUnenroll => 105,
         }
     }
 
@@ -222,12 +269,6 @@ impl Method {
             3 => Ok(Self::ListRequests),
             4 => Ok(Self::CancelRequest),
             5 => Ok(Self::GetReceipt),
-            100 => Ok(Self::RootStartPairing),
-            101 => Ok(Self::RootChangeCredentials),
-            102 => Ok(Self::RootReconcile),
-            103 => Ok(Self::RootExport),
-            104 => Ok(Self::RootPurge),
-            105 => Ok(Self::RootUnenroll),
             _ => Err(RpcError::UnknownMethod { value }),
         }
     }
@@ -766,6 +807,7 @@ fn field(number: u64, value: CborValue) -> (CborValue, CborValue) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn request() -> RpcRequest {
         RpcRequest::new(
@@ -779,6 +821,37 @@ mod tests {
         .unwrap()
     }
 
+    fn socket_test_directory(name: &str) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "rootpermit-{name}-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        directory
+    }
+
+    fn bind_for_process_test(path: &Path) -> Option<LocalSocket> {
+        match LocalSocket::bind(path, 0o660) {
+            Ok(socket) => Some(socket),
+            // The ChatGPT sandbox's seccomp profile may forbid `socket(2)`.
+            // In a normal Linux test runner this branch is never taken; the
+            // actual packet/credential assertions below then run unchanged.
+            Err(error) if error.raw_os_error() == Some(libc::EPERM) => None,
+            Err(error) => panic!("could not bind seqpacket test socket: {error}"),
+        }
+    }
+
+    fn running_as_root() -> bool {
+        Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .is_some_and(|output| output.status.success() && output.stdout == b"0\n")
+    }
+
     #[test]
     fn request_frame_round_trips_exactly() {
         let message = RpcMessage::Request(request());
@@ -787,11 +860,9 @@ mod tests {
     }
 
     #[test]
-    fn root_only_methods_are_closed_and_classified() {
-        assert!(Method::RootPurge.is_root_only());
-        assert!(Method::RootStartPairing.is_root_only());
-        assert!(!Method::GetRequest.is_root_only());
-        assert!(!Method::SubmitPackageInstall.is_root_only());
+    fn requester_method_space_cannot_name_administration_methods() {
+        assert!(Method::from_code(100).is_err());
+        assert_eq!(AdminMethod::Reconcile as u16, 3);
     }
 
     #[test]
@@ -800,15 +871,6 @@ mod tests {
         let foreign = PeerCredentials::from_so_peer_cred(12, 1001, 1001);
         let root = PeerCredentials::from_so_peer_cred(1, 0, 0);
 
-        assert_eq!(
-            authorize_method(owner, Method::SubmitPackageInstall),
-            Ok(())
-        );
-        assert_eq!(
-            authorize_method(owner, Method::RootPurge),
-            Err(ErrorCode::NotAllowed)
-        );
-        assert_eq!(authorize_method(root, Method::RootPurge), Ok(()));
         assert!(can_access_owned_request(owner, 1000));
         assert!(!can_access_owned_request(foreign, 1000));
         assert!(can_access_owned_request(root, 1000));
@@ -839,6 +901,86 @@ mod tests {
                 limit: MAX_FRAME_PAYLOAD_BYTES
             })
         );
+    }
+
+    #[test]
+    fn seqpacket_listener_preserves_one_framed_rpc_per_packet() {
+        if !running_as_root() {
+            return;
+        }
+        let directory = socket_test_directory("seqpacket");
+        let path = directory.join("broker.sock");
+        let Some(socket) = bind_for_process_test(&path) else {
+            std::fs::remove_dir(directory).unwrap();
+            return;
+        };
+        let expected = RpcMessage::Request(request());
+        let expected_for_server = expected.clone();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _credentials) = socket.accept().unwrap();
+            assert_eq!(read_frame(&mut connection).unwrap(), expected_for_server);
+            write_frame(
+                &mut connection,
+                &RpcMessage::Response(
+                    RpcResponse::new(
+                        CorrelationId::new([7; 16]),
+                        Method::SubmitPackageInstall,
+                        CborValue::Map(vec![]),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        });
+        let mut client = rp_peercred::SeqPacketConnection::connect(&path).unwrap();
+        write_frame(&mut client, &expected).unwrap();
+        assert!(matches!(
+            read_frame(&mut client).unwrap(),
+            RpcMessage::Response(_)
+        ));
+        server.join().unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn peer_uid_comes_from_a_real_nonroot_process() {
+        if let Ok(path) = std::env::var("ROOTPERMIT_PEERCRED_CHILD_SOCKET") {
+            let mut client = rp_peercred::SeqPacketConnection::connect(Path::new(&path)).unwrap();
+            write_frame(&mut client, &RpcMessage::Request(request())).unwrap();
+            return;
+        }
+        if !running_as_root() {
+            return;
+        }
+        let directory = socket_test_directory("peercred-process");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let path = directory.join("broker.sock");
+        let Some(socket) = bind_for_process_test(&path) else {
+            std::fs::remove_dir(directory).unwrap();
+            return;
+        };
+        let test_binary = std::env::current_exe().unwrap();
+        let mut child = Command::new("setpriv")
+            .args([
+                "--reuid=65534",
+                "--regid=0",
+                "--clear-groups",
+                test_binary.to_str().unwrap(),
+                "--exact",
+                "peer_uid_comes_from_a_real_nonroot_process",
+            ])
+            .env("ROOTPERMIT_PEERCRED_CHILD_SOCKET", &path)
+            .spawn()
+            .unwrap();
+        let (mut connection, credentials) = socket.accept().unwrap();
+        assert_eq!(credentials.uid, 65_534);
+        assert!(matches!(
+            read_frame(&mut connection).unwrap(),
+            RpcMessage::Request(_)
+        ));
+        assert!(child.wait().unwrap().success());
+        drop(socket);
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]

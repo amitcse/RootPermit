@@ -6,7 +6,7 @@
 //! select a signing algorithm, supply unprotected headers, or use detached
 //! payloads.
 
-use crate::{cbor, CborValue, Domain};
+use crate::{CborValue, Domain, cbor};
 use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use thiserror::Error;
 
@@ -85,7 +85,13 @@ impl VerificationKey {
         if not_after_utc <= not_before_utc || roles.is_empty() {
             return Err(CoseError::KeyOutsideValidity);
         }
-        Ok(Self { kid, public_key, not_before_utc, not_after_utc, roles })
+        Ok(Self {
+            kid,
+            public_key,
+            not_before_utc,
+            not_after_utc,
+            roles,
+        })
     }
 
     fn permits(&self, role: KeyRole, now_utc: i64) -> Result<(), CoseError> {
@@ -131,28 +137,57 @@ impl CoseSign1 {
     ) -> Result<Self, CoseError> {
         validate_kid(&kid)?;
         let protected = protected_bytes(&kid, content_type)?;
-        let signature = signing_key.sign(&signature_structure(&protected, domain, &payload)?).to_bytes();
-        Ok(Self { kid, content_type, payload, signature, protected })
+        let signature = signing_key
+            .sign(&signature_structure(&protected, domain, &payload)?)
+            .to_bytes();
+        Ok(Self {
+            kid,
+            content_type,
+            payload,
+            signature,
+            protected,
+        })
     }
 
     pub fn decode(input: &[u8]) -> Result<Self, CoseError> {
         let value = cbor::decode(input)?;
-        let CborValue::Tag(tag, tagged) = value else { return Err(CoseError::NotSign1) };
+        let CborValue::Tag(tag, tagged) = value else {
+            return Err(CoseError::NotSign1);
+        };
         if tag != COSE_SIGN1_TAG {
             return Err(CoseError::NotSign1);
         }
-        let CborValue::Array(values) = *tagged else { return Err(CoseError::InvalidStructure) };
-        let [protected, unprotected, payload, signature] = values.try_into().map_err(|_| CoseError::InvalidStructure)?;
-        let CborValue::Bytes(protected) = protected else { return Err(CoseError::InvalidStructure) };
-        let CborValue::Map(unprotected) = unprotected else { return Err(CoseError::InvalidStructure) };
+        let CborValue::Array(values) = *tagged else {
+            return Err(CoseError::InvalidStructure);
+        };
+        let [protected, unprotected, payload, signature] =
+            values.try_into().map_err(|_| CoseError::InvalidStructure)?;
+        let CborValue::Bytes(protected) = protected else {
+            return Err(CoseError::InvalidStructure);
+        };
+        let CborValue::Map(unprotected) = unprotected else {
+            return Err(CoseError::InvalidStructure);
+        };
         if !unprotected.is_empty() {
             return Err(CoseError::UnprotectedHeaderPresent);
         }
-        let CborValue::Bytes(payload) = payload else { return Err(CoseError::InvalidStructure) };
-        let CborValue::Bytes(signature) = signature else { return Err(CoseError::InvalidStructure) };
-        let signature: [u8; ED25519_SIGNATURE_BYTES] = signature.try_into().map_err(|_| CoseError::InvalidSignatureLength)?;
+        let CborValue::Bytes(payload) = payload else {
+            return Err(CoseError::InvalidStructure);
+        };
+        let CborValue::Bytes(signature) = signature else {
+            return Err(CoseError::InvalidStructure);
+        };
+        let signature: [u8; ED25519_SIGNATURE_BYTES] = signature
+            .try_into()
+            .map_err(|_| CoseError::InvalidSignatureLength)?;
         let (kid, content_type) = parse_protected(&protected)?;
-        Ok(Self { kid, content_type, payload, signature, protected })
+        Ok(Self {
+            kid,
+            content_type,
+            payload,
+            signature,
+            protected,
+        })
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, CoseError> {
@@ -175,7 +210,11 @@ impl CoseSign1 {
 
     /// Validates the exact protected header, signing key ID, role, validity and
     /// Ed25519 signature before returning the payload bytes.
-    pub fn verify(&self, key: &VerificationKey, policy: VerificationPolicy) -> Result<(), CoseError> {
+    pub fn verify(
+        &self,
+        key: &VerificationKey,
+        policy: VerificationPolicy,
+    ) -> Result<(), CoseError> {
         if self.content_type != policy.content_type {
             return Err(CoseError::ContentTypeMismatch);
         }
@@ -185,7 +224,10 @@ impl CoseSign1 {
         key.permits(policy.required_role, policy.now_utc)?;
         let signature = Signature::from_bytes(&self.signature);
         key.public_key
-            .verify(&signature_structure(&self.protected, policy.domain, &self.payload)?, &signature)
+            .verify(
+                &signature_structure(&self.protected, policy.domain, &self.payload)?,
+                &signature,
+            )
             .map_err(|_| CoseError::InvalidSignature)
     }
 }
@@ -200,14 +242,25 @@ fn validate_kid(kid: &[u8]) -> Result<(), CoseError> {
 fn protected_bytes(kid: &[u8], content_type: u64) -> Result<Vec<u8>, CoseError> {
     validate_kid(kid)?;
     Ok(cbor::encode(&CborValue::Map(vec![
-        (CborValue::Unsigned(COSE_ALG_LABEL), CborValue::Negative(COSE_EDDSA)),
-        (CborValue::Unsigned(COSE_CONTENT_TYPE_LABEL), CborValue::Unsigned(content_type)),
-        (CborValue::Unsigned(COSE_KID_LABEL), CborValue::Bytes(kid.to_vec())),
+        (
+            CborValue::Unsigned(COSE_ALG_LABEL),
+            CborValue::Negative(COSE_EDDSA),
+        ),
+        (
+            CborValue::Unsigned(COSE_CONTENT_TYPE_LABEL),
+            CborValue::Unsigned(content_type),
+        ),
+        (
+            CborValue::Unsigned(COSE_KID_LABEL),
+            CborValue::Bytes(kid.to_vec()),
+        ),
     ]))?)
 }
 
 fn parse_protected(bytes: &[u8]) -> Result<(Vec<u8>, u64), CoseError> {
-    let CborValue::Map(entries) = cbor::decode(bytes)? else { return Err(CoseError::InvalidProtectedHeader) };
+    let CborValue::Map(entries) = cbor::decode(bytes)? else {
+        return Err(CoseError::InvalidProtectedHeader);
+    };
     if entries.len() != 3 {
         return Err(CoseError::InvalidProtectedHeader);
     }
@@ -215,7 +268,9 @@ fn parse_protected(bytes: &[u8]) -> Result<(Vec<u8>, u64), CoseError> {
     let mut content_type = None;
     let mut kid = None;
     for (key, value) in entries {
-        let CborValue::Unsigned(key) = key else { return Err(CoseError::InvalidProtectedHeader) };
+        let CborValue::Unsigned(key) = key else {
+            return Err(CoseError::InvalidProtectedHeader);
+        };
         match (key, value) {
             (COSE_ALG_LABEL, CborValue::Negative(value)) => algorithm = Some(value),
             (COSE_CONTENT_TYPE_LABEL, CborValue::Unsigned(value)) => content_type = Some(value),
@@ -231,7 +286,11 @@ fn parse_protected(bytes: &[u8]) -> Result<(Vec<u8>, u64), CoseError> {
     Ok((kid, content_type.ok_or(CoseError::InvalidProtectedHeader)?))
 }
 
-fn signature_structure(protected: &[u8], domain: Domain, payload: &[u8]) -> Result<Vec<u8>, CoseError> {
+fn signature_structure(
+    protected: &[u8],
+    domain: Domain,
+    payload: &[u8],
+) -> Result<Vec<u8>, CoseError> {
     Ok(cbor::encode(&CborValue::Array(vec![
         CborValue::Text("Signature1".into()),
         CborValue::Bytes(protected.to_vec()),
@@ -244,29 +303,71 @@ fn signature_structure(protected: &[u8], domain: Domain, payload: &[u8]) -> Resu
 mod tests {
     use super::*;
 
-    fn key() -> SigningKey { SigningKey::from_bytes(&[7; 32]) }
+    fn key() -> SigningKey {
+        SigningKey::from_bytes(&[7; 32])
+    }
 
     fn verifier() -> VerificationKey {
-        VerificationKey::new(vec![9; 8], key().verifying_key(), 10, 20, vec![KeyRole::Broker]).unwrap()
+        VerificationKey::new(
+            vec![9; 8],
+            key().verifying_key(),
+            10,
+            20,
+            vec![KeyRole::Broker],
+        )
+        .unwrap()
     }
 
     fn policy() -> VerificationPolicy {
-        VerificationPolicy { content_type: 1, domain: Domain::Request, required_role: KeyRole::Broker, now_utc: 15 }
+        VerificationPolicy {
+            content_type: 1,
+            domain: Domain::Request,
+            required_role: KeyRole::Broker,
+            now_utc: 15,
+        }
     }
 
     #[test]
     fn sign1_round_trip_binds_payload_and_domain() {
-        let envelope = CoseSign1::sign(vec![1, 2, 3], vec![9; 8], 1, Domain::Request, &key()).unwrap();
+        let envelope =
+            CoseSign1::sign(vec![1, 2, 3], vec![9; 8], 1, Domain::Request, &key()).unwrap();
         let decoded = CoseSign1::decode(&envelope.encode().unwrap()).unwrap();
         decoded.verify(&verifier(), policy()).unwrap();
         assert_eq!(decoded.payload, vec![1, 2, 3]);
-        assert_eq!(decoded.verify(&verifier(), VerificationPolicy { domain: Domain::Receipt, ..policy() }), Err(CoseError::InvalidSignature));
+        assert_eq!(
+            decoded.verify(
+                &verifier(),
+                VerificationPolicy {
+                    domain: Domain::Receipt,
+                    ..policy()
+                }
+            ),
+            Err(CoseError::InvalidSignature)
+        );
     }
 
     #[test]
     fn verification_rejects_wrong_role_and_expired_key() {
         let envelope = CoseSign1::sign(vec![], vec![9; 8], 1, Domain::Request, &key()).unwrap();
-        assert_eq!(envelope.verify(&verifier(), VerificationPolicy { required_role: KeyRole::Revocation, ..policy() }), Err(CoseError::KeyRoleMismatch));
-        assert_eq!(envelope.verify(&verifier(), VerificationPolicy { now_utc: 20, ..policy() }), Err(CoseError::KeyOutsideValidity));
+        assert_eq!(
+            envelope.verify(
+                &verifier(),
+                VerificationPolicy {
+                    required_role: KeyRole::Revocation,
+                    ..policy()
+                }
+            ),
+            Err(CoseError::KeyRoleMismatch)
+        );
+        assert_eq!(
+            envelope.verify(
+                &verifier(),
+                VerificationPolicy {
+                    now_utc: 20,
+                    ..policy()
+                }
+            ),
+            Err(CoseError::KeyOutsideValidity)
+        );
     }
 }

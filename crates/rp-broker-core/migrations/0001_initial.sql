@@ -21,7 +21,7 @@ CREATE TABLE requests (
 );
 CREATE UNIQUE INDEX requests_idempotency ON requests (requester_uid, operation_key);
 CREATE UNIQUE INDEX requests_one_active_per_device ON requests (device_id)
-    WHERE state IN ('planning', 'pending', 'approved', 'executing');
+    WHERE state IN ('planning', 'pending', 'approved', 'executing', 'recovery_required');
 CREATE TABLE request_events (
     request_id TEXT NOT NULL REFERENCES requests (request_id) ON DELETE RESTRICT,
     sequence INTEGER NOT NULL CHECK (sequence > 0),

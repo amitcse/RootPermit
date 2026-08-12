@@ -292,6 +292,7 @@ dependencies = [
 name = "rp-broker-api"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "rp-peercred",
  "rp-protocol",
  "thiserror",
@@ -301,7 +302,10 @@ dependencies = [
 name = "rp-broker-core"
 version = "0.0.0"
 dependencies = [
+ "base64",
+ "ed25519-dalek",
  "rp-protocol",
+ "rp-web-authn",
  "rusqlite",
  "sha2",
  "thiserror",
