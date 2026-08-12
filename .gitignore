@@ -14,3 +14,4 @@
 *.spdx.json
 *.cdx.json
 artifacts/
+.gstack/
