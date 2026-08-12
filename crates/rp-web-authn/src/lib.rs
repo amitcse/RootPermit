@@ -144,7 +144,8 @@ pub fn verify_submission(
     if assertion.origin != pending_context.origin {
         return Err(WebAuthnError::OriginMismatch);
     }
-    if assertion.rp_id_hash != Sha256::digest(pending_context.rp_id.as_bytes()).into() {
+    let expected_rp_id_hash: [u8; 32] = Sha256::digest(pending_context.rp_id.as_bytes()).into();
+    if assertion.rp_id_hash != expected_rp_id_hash {
         return Err(WebAuthnError::RpIdMismatch);
     }
     if !assertion.user_present {
@@ -214,7 +215,7 @@ mod tests {
         assert!(!result.counter_anomaly);
         let mut anomalous = assertion(&context);
         anomalous.sign_count = 4;
-        assert!(verify_submission(&FakeVerifier { assertion: anomalous }, &context, &[credential()], &submission(context)).unwrap().counter_anomaly);
+        assert!(verify_submission(&FakeVerifier { assertion: anomalous }, &context, &[credential()], &submission(context.clone())).unwrap().counter_anomaly);
     }
 
     #[test]
@@ -226,6 +227,6 @@ mod tests {
         let mut no_uv = assertion(&context);
         no_uv.user_verified = false;
         assert_eq!(verify_submission(&FakeVerifier { assertion: no_uv }, &context, &[credential()], &submission(context.clone())), Err(WebAuthnError::UserVerificationMissing));
-        assert_eq!(verify_submission(&FakeVerifier { assertion: assertion(&context) }, &context, &[], &submission(context)), Err(WebAuthnError::CredentialNotPinned));
+        assert_eq!(verify_submission(&FakeVerifier { assertion: assertion(&context) }, &context, &[], &submission(context.clone())), Err(WebAuthnError::CredentialNotPinned));
     }
 }

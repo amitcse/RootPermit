@@ -18,7 +18,7 @@ pub use digest::{digest_cbor, Domain, Digest};
 pub use ids::{BootId, DeviceId, IdentifierError, Nonce, PolicyId, ReceiptId, RequestId, ServiceEventId};
 pub use schema::{
     ApprovalContext, Decision, DecisionSubmission, EnrollmentStatement, LifecycleEvent, Operation,
-    OperationInput, PlanManifest, Receipt, RevocationEvent, SchemaError, ServiceKeyset,
+    OperationInput, PlanManifest, Receipt, Request, RevocationEvent, SchemaError, ServiceKeyset,
 };
 
 /// The only protocol version implemented by this crate.

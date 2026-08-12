@@ -8,14 +8,104 @@
 
 #![forbid(unsafe_code)]
 
-use rp_protocol::{decode, encode, CborValue, DecodeError, EncodeError, VERSION};
+use rp_protocol::{CborValue, DecodeError, EncodeError, VERSION, decode, encode};
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Maximum CBOR payload in a local broker packet. This is separate from the
 /// protocol crate's broader object bound and is checked before allocation.
 pub const MAX_FRAME_PAYLOAD_BYTES: usize = 65_536;
 pub const FRAME_LENGTH_BYTES: usize = 4;
+
+/// Root-owned local socket acceptor. Framing stays packet-shaped even though
+/// the portable Rust adapter uses a stream socket: the declared length is read
+/// exactly and trailing bytes remain for the next request rather than being
+/// interpreted as part of the current CBOR object.
+pub struct LocalSocket {
+    listener: UnixListener,
+    path: PathBuf,
+}
+
+impl LocalSocket {
+    /// Binds a private socket and applies its configured requester group mode.
+    /// The parent directory must already be root/admin managed.
+    pub fn bind(path: &Path, mode: u32) -> std::io::Result<Self> {
+        if mode & !0o770 != 0 || mode & 0o007 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "unsafe socket mode",
+            ));
+        }
+        match fs::symlink_metadata(path) {
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "socket path exists",
+                ));
+            }
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+            Err(_) => {}
+        }
+        let listener = UnixListener::bind(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+        Ok(Self {
+            listener,
+            path: path.to_owned(),
+        })
+    }
+
+    /// Accepts a connection and derives identity only from `SO_PEERCRED`.
+    pub fn accept(&self) -> std::io::Result<(UnixStream, PeerCredentials)> {
+        let (stream, _) = self.listener.accept()?;
+        let credentials = rp_peercred::get(&stream)?;
+        Ok((
+            stream,
+            PeerCredentials::from_so_peer_cred(credentials.pid, credentials.uid, credentials.gid),
+        ))
+    }
+}
+
+impl Drop for LocalSocket {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Reads one bounded length-prefixed RPC frame without trusting peer sizes.
+#[derive(Debug, Error)]
+pub enum SocketError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Frame(#[from] FrameError),
+    #[error("RPC payload exceeds the local socket limit")]
+    OversizePayload,
+}
+
+pub fn read_frame(stream: &mut UnixStream) -> Result<RpcMessage, SocketError> {
+    let mut prefix = [0_u8; FRAME_LENGTH_BYTES];
+    stream.read_exact(&mut prefix)?;
+    let length =
+        usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| SocketError::OversizePayload)?;
+    if length > MAX_FRAME_PAYLOAD_BYTES {
+        return Err(SocketError::OversizePayload);
+    }
+    let mut packet = vec![0; FRAME_LENGTH_BYTES + length];
+    packet[..FRAME_LENGTH_BYTES].copy_from_slice(&prefix);
+    stream.read_exact(&mut packet[FRAME_LENGTH_BYTES..])?;
+    Ok(RpcMessage::decode_frame(&packet)?)
+}
+
+/// Writes one complete bounded frame.
+pub fn write_frame(stream: &mut UnixStream, message: &RpcMessage) -> Result<(), SocketError> {
+    stream.write_all(&message.encode_frame()?)?;
+    Ok(())
+}
 
 /// Kernel-provided Unix peer identity. These values are intentionally absent
 /// from every RPC CBOR message. A platform socket adapter must construct this
@@ -333,9 +423,13 @@ impl RpcMessage {
         let message = self.to_cbor()?;
         let payload = encode(&message).map_err(RpcError::from)?;
         if payload.len() > MAX_FRAME_PAYLOAD_BYTES {
-            return Err(FrameError::PayloadTooLarge { limit: MAX_FRAME_PAYLOAD_BYTES });
+            return Err(FrameError::PayloadTooLarge {
+                limit: MAX_FRAME_PAYLOAD_BYTES,
+            });
         }
-        let length = u32::try_from(payload.len()).map_err(|_| FrameError::PayloadTooLarge { limit: MAX_FRAME_PAYLOAD_BYTES })?;
+        let length = u32::try_from(payload.len()).map_err(|_| FrameError::PayloadTooLarge {
+            limit: MAX_FRAME_PAYLOAD_BYTES,
+        })?;
         let mut frame = Vec::with_capacity(FRAME_LENGTH_BYTES + payload.len());
         frame.extend_from_slice(&length.to_be_bytes());
         frame.extend_from_slice(&payload);
@@ -346,11 +440,19 @@ impl RpcMessage {
         if packet.len() < FRAME_LENGTH_BYTES {
             return Err(FrameError::TooShort);
         }
-        let declared = u32::from_be_bytes(packet[..FRAME_LENGTH_BYTES].try_into().map_err(|_| FrameError::TooShort)?);
-        let declared = usize::try_from(declared).map_err(|_| FrameError::PayloadTooLarge { limit: MAX_FRAME_PAYLOAD_BYTES })?;
+        let declared = u32::from_be_bytes(
+            packet[..FRAME_LENGTH_BYTES]
+                .try_into()
+                .map_err(|_| FrameError::TooShort)?,
+        );
+        let declared = usize::try_from(declared).map_err(|_| FrameError::PayloadTooLarge {
+            limit: MAX_FRAME_PAYLOAD_BYTES,
+        })?;
         let actual = packet.len() - FRAME_LENGTH_BYTES;
         if declared > MAX_FRAME_PAYLOAD_BYTES {
-            return Err(FrameError::PayloadTooLarge { limit: MAX_FRAME_PAYLOAD_BYTES });
+            return Err(FrameError::PayloadTooLarge {
+                limit: MAX_FRAME_PAYLOAD_BYTES,
+            });
         }
         if declared != actual {
             return Err(FrameError::LengthMismatch { declared, actual });
@@ -379,14 +481,27 @@ impl RpcMessage {
 }
 
 impl RpcRequest {
-    pub fn new(correlation_id: CorrelationId, method: Method, body: CborValue) -> Result<Self, RpcError> {
+    pub fn new(
+        correlation_id: CorrelationId,
+        method: Method,
+        body: CborValue,
+    ) -> Result<Self, RpcError> {
         validate_body(&body, 5)?;
-        Ok(Self { correlation_id, method, body })
+        Ok(Self {
+            correlation_id,
+            method,
+            body,
+        })
     }
 
     fn to_cbor(&self) -> Result<CborValue, RpcError> {
         validate_body(&self.body, 5)?;
-        Ok(envelope(MessageKind::Request, self.correlation_id, self.method, self.body.clone()))
+        Ok(envelope(
+            MessageKind::Request,
+            self.correlation_id,
+            self.method,
+            self.body.clone(),
+        ))
     }
 
     fn from_fields(mut fields: BTreeMap<u64, CborValue>) -> Result<Self, RpcError> {
@@ -398,14 +513,27 @@ impl RpcRequest {
 }
 
 impl RpcResponse {
-    pub fn new(correlation_id: CorrelationId, method: Method, body: CborValue) -> Result<Self, RpcError> {
+    pub fn new(
+        correlation_id: CorrelationId,
+        method: Method,
+        body: CborValue,
+    ) -> Result<Self, RpcError> {
         validate_body(&body, 5)?;
-        Ok(Self { correlation_id, method, body })
+        Ok(Self {
+            correlation_id,
+            method,
+            body,
+        })
     }
 
     fn to_cbor(&self) -> Result<CborValue, RpcError> {
         validate_body(&self.body, 5)?;
-        Ok(envelope(MessageKind::Response, self.correlation_id, self.method, self.body.clone()))
+        Ok(envelope(
+            MessageKind::Response,
+            self.correlation_id,
+            self.method,
+            self.body.clone(),
+        ))
     }
 
     fn from_fields(mut fields: BTreeMap<u64, CborValue>) -> Result<Self, RpcError> {
@@ -427,7 +555,13 @@ impl RpcFailure {
         if let Some(details) = &details {
             validate_body(details, 7)?;
         }
-        Ok(Self { correlation_id, method, code, retryable, details })
+        Ok(Self {
+            correlation_id,
+            method,
+            code,
+            retryable,
+            details,
+        })
     }
 
     fn to_cbor(&self) -> Result<CborValue, RpcError> {
@@ -452,11 +586,22 @@ impl RpcFailure {
         if let Some(details) = &details {
             validate_body(details, 7)?;
         }
-        Ok(Self { correlation_id, method, code, retryable, details })
+        Ok(Self {
+            correlation_id,
+            method,
+            code,
+            retryable,
+            details,
+        })
     }
 }
 
-fn envelope(kind: MessageKind, correlation_id: CorrelationId, method: Method, body: CborValue) -> CborValue {
+fn envelope(
+    kind: MessageKind,
+    correlation_id: CorrelationId,
+    method: Method,
+    body: CborValue,
+) -> CborValue {
     CborValue::Map({
         let mut entries = envelope_entries(kind, correlation_id, method);
         entries.push(field(5, body));
@@ -464,7 +609,11 @@ fn envelope(kind: MessageKind, correlation_id: CorrelationId, method: Method, bo
     })
 }
 
-fn envelope_entries(kind: MessageKind, correlation_id: CorrelationId, method: Method) -> Vec<(CborValue, CborValue)> {
+fn envelope_entries(
+    kind: MessageKind,
+    correlation_id: CorrelationId,
+    method: Method,
+) -> Vec<(CborValue, CborValue)> {
     vec![
         field(1, CborValue::Unsigned(VERSION)),
         field(2, CborValue::Unsigned(kind.code())),
@@ -474,10 +623,14 @@ fn envelope_entries(kind: MessageKind, correlation_id: CorrelationId, method: Me
 }
 
 fn fields(value: CborValue) -> Result<BTreeMap<u64, CborValue>, RpcError> {
-    let CborValue::Map(entries) = value else { return Err(RpcError::RootNotMap) };
+    let CborValue::Map(entries) = value else {
+        return Err(RpcError::RootNotMap);
+    };
     let mut result = BTreeMap::new();
     for (key, value) in entries {
-        let CborValue::Unsigned(key) = key else { return Err(RpcError::RootNotMap) };
+        let CborValue::Unsigned(key) = key else {
+            return Err(RpcError::RootNotMap);
+        };
         if result.insert(key, value).is_some() {
             return Err(RpcError::InvalidField { field: key });
         }
@@ -488,13 +641,18 @@ fn fields(value: CborValue) -> Result<BTreeMap<u64, CborValue>, RpcError> {
 fn reject_unknown(fields: &BTreeMap<u64, CborValue>, known: &[u64]) -> Result<(), RpcError> {
     for field_number in fields.keys() {
         if !known.contains(field_number) {
-            return Err(RpcError::UnknownField { field: *field_number });
+            return Err(RpcError::UnknownField {
+                field: *field_number,
+            });
         }
     }
     Ok(())
 }
 
-fn common_fields(fields: &mut BTreeMap<u64, CborValue>, expected_kind: MessageKind) -> Result<(CorrelationId, Method), RpcError> {
+fn common_fields(
+    fields: &mut BTreeMap<u64, CborValue>,
+    expected_kind: MessageKind,
+) -> Result<(CorrelationId, Method), RpcError> {
     let version = required_unsigned(fields, 1)?;
     if version != VERSION {
         return Err(RpcError::ProtocolMismatch { actual: version });
@@ -503,50 +661,91 @@ fn common_fields(fields: &mut BTreeMap<u64, CborValue>, expected_kind: MessageKi
         return Err(RpcError::InvalidField { field: 2 });
     }
     let id = required_bytes(fields, 3, 16)?;
-    let correlation_id = CorrelationId::new(id.try_into().map_err(|_| RpcError::InvalidField { field: 3 })?);
+    let correlation_id = CorrelationId::new(
+        id.try_into()
+            .map_err(|_| RpcError::InvalidField { field: 3 })?,
+    );
     let method = Method::from_code(required_unsigned(fields, 4)?)?;
     Ok((correlation_id, method))
 }
 
-fn required(fields: &mut BTreeMap<u64, CborValue>, field_number: u64) -> Result<CborValue, RpcError> {
-    fields.remove(&field_number).ok_or(RpcError::MissingField { field: field_number })
+fn required(
+    fields: &mut BTreeMap<u64, CborValue>,
+    field_number: u64,
+) -> Result<CborValue, RpcError> {
+    fields.remove(&field_number).ok_or(RpcError::MissingField {
+        field: field_number,
+    })
 }
 
-fn required_unsigned_ref(fields: &BTreeMap<u64, CborValue>, field_number: u64) -> Result<u64, RpcError> {
+fn required_unsigned_ref(
+    fields: &BTreeMap<u64, CborValue>,
+    field_number: u64,
+) -> Result<u64, RpcError> {
     match fields.get(&field_number) {
         Some(CborValue::Unsigned(value)) => Ok(*value),
-        Some(_) => Err(RpcError::WrongType { field: field_number }),
-        None => Err(RpcError::MissingField { field: field_number }),
+        Some(_) => Err(RpcError::WrongType {
+            field: field_number,
+        }),
+        None => Err(RpcError::MissingField {
+            field: field_number,
+        }),
     }
 }
 
-fn required_unsigned(fields: &mut BTreeMap<u64, CborValue>, field_number: u64) -> Result<u64, RpcError> {
+fn required_unsigned(
+    fields: &mut BTreeMap<u64, CborValue>,
+    field_number: u64,
+) -> Result<u64, RpcError> {
     match required(fields, field_number)? {
         CborValue::Unsigned(value) => Ok(value),
-        _ => Err(RpcError::WrongType { field: field_number }),
+        _ => Err(RpcError::WrongType {
+            field: field_number,
+        }),
     }
 }
 
-fn required_bytes(fields: &mut BTreeMap<u64, CborValue>, field_number: u64, length: usize) -> Result<Vec<u8>, RpcError> {
+fn required_bytes(
+    fields: &mut BTreeMap<u64, CborValue>,
+    field_number: u64,
+    length: usize,
+) -> Result<Vec<u8>, RpcError> {
     match required(fields, field_number)? {
         CborValue::Bytes(value) if value.len() == length => Ok(value),
-        CborValue::Bytes(_) => Err(RpcError::InvalidField { field: field_number }),
-        _ => Err(RpcError::WrongType { field: field_number }),
+        CborValue::Bytes(_) => Err(RpcError::InvalidField {
+            field: field_number,
+        }),
+        _ => Err(RpcError::WrongType {
+            field: field_number,
+        }),
     }
 }
 
-fn required_text(fields: &mut BTreeMap<u64, CborValue>, field_number: u64, maximum: usize) -> Result<String, RpcError> {
+fn required_text(
+    fields: &mut BTreeMap<u64, CborValue>,
+    field_number: u64,
+    maximum: usize,
+) -> Result<String, RpcError> {
     match required(fields, field_number)? {
         CborValue::Text(value) if value.len() <= maximum => Ok(value),
-        CborValue::Text(_) => Err(RpcError::InvalidField { field: field_number }),
-        _ => Err(RpcError::WrongType { field: field_number }),
+        CborValue::Text(_) => Err(RpcError::InvalidField {
+            field: field_number,
+        }),
+        _ => Err(RpcError::WrongType {
+            field: field_number,
+        }),
     }
 }
 
-fn required_bool(fields: &mut BTreeMap<u64, CborValue>, field_number: u64) -> Result<bool, RpcError> {
+fn required_bool(
+    fields: &mut BTreeMap<u64, CborValue>,
+    field_number: u64,
+) -> Result<bool, RpcError> {
     match required(fields, field_number)? {
         CborValue::Bool(value) => Ok(value),
-        _ => Err(RpcError::WrongType { field: field_number }),
+        _ => Err(RpcError::WrongType {
+            field: field_number,
+        }),
     }
 }
 
@@ -554,7 +753,9 @@ fn validate_body(value: &CborValue, field_number: u64) -> Result<(), RpcError> {
     if matches!(value, CborValue::Map(_)) {
         Ok(())
     } else {
-        Err(RpcError::WrongType { field: field_number })
+        Err(RpcError::WrongType {
+            field: field_number,
+        })
     }
 }
 
@@ -570,7 +771,10 @@ mod tests {
         RpcRequest::new(
             CorrelationId::new([7; 16]),
             Method::SubmitPackageInstall,
-            CborValue::Map(vec![(CborValue::Unsigned(1), CborValue::Text("ffmpeg".into()))]),
+            CborValue::Map(vec![(
+                CborValue::Unsigned(1),
+                CborValue::Text("ffmpeg".into()),
+            )]),
         )
         .unwrap()
     }
@@ -596,38 +800,72 @@ mod tests {
         let foreign = PeerCredentials::from_so_peer_cred(12, 1001, 1001);
         let root = PeerCredentials::from_so_peer_cred(1, 0, 0);
 
-        assert_eq!(authorize_method(owner, Method::SubmitPackageInstall), Ok(()));
-        assert_eq!(authorize_method(owner, Method::RootPurge), Err(ErrorCode::NotAllowed));
+        assert_eq!(
+            authorize_method(owner, Method::SubmitPackageInstall),
+            Ok(())
+        );
+        assert_eq!(
+            authorize_method(owner, Method::RootPurge),
+            Err(ErrorCode::NotAllowed)
+        );
         assert_eq!(authorize_method(root, Method::RootPurge), Ok(()));
         assert!(can_access_owned_request(owner, 1000));
         assert!(!can_access_owned_request(foreign, 1000));
         assert!(can_access_owned_request(root, 1000));
-        assert_eq!(concealed_visibility_error(), ErrorCode::NotFoundOrNotAuthorized);
+        assert_eq!(
+            concealed_visibility_error(),
+            ErrorCode::NotFoundOrNotAuthorized
+        );
     }
 
     #[test]
     fn hostile_packet_lengths_are_rejected_before_decode() {
         assert_eq!(RpcMessage::decode_frame(&[]), Err(FrameError::TooShort));
-        assert_eq!(RpcMessage::decode_frame(&[0, 0, 0]), Err(FrameError::TooShort));
-        assert_eq!(RpcMessage::decode_frame(&[0, 0, 0, 2, 0xf6]), Err(FrameError::LengthMismatch { declared: 2, actual: 1 }));
+        assert_eq!(
+            RpcMessage::decode_frame(&[0, 0, 0]),
+            Err(FrameError::TooShort)
+        );
+        assert_eq!(
+            RpcMessage::decode_frame(&[0, 0, 0, 2, 0xf6]),
+            Err(FrameError::LengthMismatch {
+                declared: 2,
+                actual: 1
+            })
+        );
         let oversized = 65_537_u32.to_be_bytes();
-        assert_eq!(RpcMessage::decode_frame(&oversized), Err(FrameError::PayloadTooLarge { limit: MAX_FRAME_PAYLOAD_BYTES }));
+        assert_eq!(
+            RpcMessage::decode_frame(&oversized),
+            Err(FrameError::PayloadTooLarge {
+                limit: MAX_FRAME_PAYLOAD_BYTES
+            })
+        );
     }
 
     #[test]
     fn unknown_method_and_unknown_fields_fail_closed() {
         let unknown_method = CborValue::Map(vec![
-            field(1, CborValue::Unsigned(VERSION)), field(2, CborValue::Unsigned(1)),
-            field(3, CborValue::Bytes(vec![0; 16])), field(4, CborValue::Unsigned(99)),
+            field(1, CborValue::Unsigned(VERSION)),
+            field(2, CborValue::Unsigned(1)),
+            field(3, CborValue::Bytes(vec![0; 16])),
+            field(4, CborValue::Unsigned(99)),
             field(5, CborValue::Map(vec![])),
         ]);
-        assert_eq!(RpcMessage::from_cbor(unknown_method), Err(RpcError::UnknownMethod { value: 99 }));
+        assert_eq!(
+            RpcMessage::from_cbor(unknown_method),
+            Err(RpcError::UnknownMethod { value: 99 })
+        );
 
         let unknown_field = CborValue::Map(vec![
-            field(1, CborValue::Unsigned(VERSION)), field(2, CborValue::Unsigned(1)),
-            field(3, CborValue::Bytes(vec![0; 16])), field(4, CborValue::Unsigned(1)),
-            field(5, CborValue::Map(vec![])), field(6, CborValue::Null),
+            field(1, CborValue::Unsigned(VERSION)),
+            field(2, CborValue::Unsigned(1)),
+            field(3, CborValue::Bytes(vec![0; 16])),
+            field(4, CborValue::Unsigned(1)),
+            field(5, CborValue::Map(vec![])),
+            field(6, CborValue::Null),
         ]);
-        assert_eq!(RpcMessage::from_cbor(unknown_field), Err(RpcError::UnknownField { field: 6 }));
+        assert_eq!(
+            RpcMessage::from_cbor(unknown_field),
+            Err(RpcError::UnknownField { field: 6 })
+        );
     }
 }

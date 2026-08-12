@@ -6,16 +6,21 @@
 
 #![forbid(unsafe_code)]
 
-use rusqlite::{
-    Connection, OptionalExtension, Transaction, TransactionBehavior, params,
-};
 use rp_protocol::{CborValue, Decision, Digest, Domain, digest_cbor};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::OpenOptions;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::Path;
 use thiserror::Error;
 
+const MIGRATIONS: [&str; 2] = [
+    include_str!("../migrations/0001_initial.sql"),
+    include_str!("../migrations/0002_credentials.sql"),
+];
+
 const LOCAL_DEVICE_ID: &str = "AAAAAAAAAAAAAAAAAAAAAA";
-const ACTIVE_STATES: &str = "'planning', 'pending', 'approved', 'executing'";
 
 /// A kernel-authenticated requester UID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -87,7 +92,9 @@ impl PackageName {
         let value = value.into();
         let bytes = value.as_bytes();
         if !(2..=64).contains(&bytes.len())
-            || !bytes.first().is_some_and(u8::is_ascii_lowercase)
+            || !bytes
+                .first()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
             || !bytes[1..].iter().copied().all(is_package_character)
         {
             return Err(IntakeError::InvalidPackageName);
@@ -112,7 +119,7 @@ pub enum IntakeError {
     #[error("operation key must be a 16-128 character base64url value")]
     InvalidOperationKey,
     /// The package name is not a bounded, native Debian binary package name.
-    #[error("package name must be 2-64 lowercase ASCII Debian-name characters")]
+    #[error("package name must be 2-64 ASCII Debian binary package-name characters")]
     InvalidPackageName,
 }
 
@@ -156,7 +163,9 @@ impl PackageAllowlist {
     /// Builds an allowlist from already-validated package names.
     #[must_use]
     pub fn new(packages: impl IntoIterator<Item = PackageName>) -> Self {
-        Self { packages: packages.into_iter().collect() }
+        Self {
+            packages: packages.into_iter().collect(),
+        }
     }
 }
 
@@ -223,11 +232,19 @@ impl RequestState {
     pub const fn permits(self, next: Self) -> bool {
         matches!(
             (self, next),
-            (Self::Planning, Self::Pending | Self::NoChange | Self::Invalid)
-                | (Self::Pending, Self::Approved | Self::Denied | Self::Expired | Self::Cancelled | Self::Stale)
-                | (Self::Approved, Self::Executing | Self::Cancelled | Self::Stale | Self::Expired)
-                | (Self::Executing, Self::Succeeded | Self::Failed | Self::RecoveryRequired)
-                | (Self::RecoveryRequired, Self::Succeeded | Self::Failed)
+            (
+                Self::Planning,
+                Self::Pending | Self::NoChange | Self::Invalid
+            ) | (
+                Self::Pending,
+                Self::Approved | Self::Denied | Self::Expired | Self::Cancelled | Self::Stale
+            ) | (
+                Self::Approved,
+                Self::Executing | Self::Cancelled | Self::Stale | Self::Expired
+            ) | (
+                Self::Executing,
+                Self::Succeeded | Self::Failed | Self::RecoveryRequired
+            ) | (Self::RecoveryRequired, Self::Succeeded | Self::Failed)
         )
     }
 
@@ -332,6 +349,15 @@ pub enum BrokerError {
     /// SQLite stored an integer that does not fit its security-relevant type.
     #[error("broker database contains an out-of-range numeric value")]
     NumericOutOfRange,
+    /// A durable broker file has unsafe ownership, mode, type, or contents.
+    #[error("broker durable state has unsafe filesystem metadata")]
+    UnsafeFile,
+    /// A broker signing key could not be read or written.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// The schema is newer than this broker or failed an integrity check.
+    #[error("broker database is corrupt or has an unsupported schema")]
+    UnsupportedSchema,
 }
 
 /// Authoritative local state store; no other component may mutate its connection.
@@ -349,41 +375,75 @@ impl BrokerStore {
 
     /// Installs broker-owned schema and pragmas on an otherwise private connection.
     pub fn from_connection(connection: Connection) -> Result<Self, BrokerError> {
-        connection.execute_batch(&format!(
-            "
-            PRAGMA foreign_keys = ON;
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = FULL;
-            CREATE TABLE IF NOT EXISTS requests (
-                request_id TEXT PRIMARY KEY,
-                device_id TEXT NOT NULL,
-                requester_uid INTEGER NOT NULL CHECK (requester_uid >= 0),
-                operation_key TEXT NOT NULL,
-                input_digest BLOB NOT NULL CHECK (length(input_digest) = 32),
-                package_name TEXT NOT NULL,
-                generation INTEGER NOT NULL CHECK (generation >= 0),
-                state TEXT NOT NULL CHECK (state IN (
-                    'planning', 'pending', 'approved', 'executing', 'no_change', 'invalid',
-                    'denied', 'expired', 'cancelled', 'stale', 'succeeded', 'failed', 'recovery_required'
-                ))
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS requests_idempotency
-                ON requests (requester_uid, operation_key);
-            CREATE UNIQUE INDEX IF NOT EXISTS requests_one_active_per_device
-                ON requests (device_id)
-                WHERE state IN ({ACTIVE_STATES});
-            CREATE TABLE IF NOT EXISTS request_events (
-                request_id TEXT NOT NULL REFERENCES requests (request_id) ON DELETE RESTRICT,
-                sequence INTEGER NOT NULL CHECK (sequence > 0),
-                state TEXT NOT NULL,
-                reason INTEGER NOT NULL CHECK (reason > 0),
-                previous_event_digest BLOB CHECK (previous_event_digest IS NULL OR length(previous_event_digest) = 32),
-                event_digest BLOB NOT NULL CHECK (length(event_digest) = 32),
-                PRIMARY KEY (request_id, sequence)
-            );
-            "
-        ))?;
-        Ok(Self { connection, device_id: LOCAL_DEVICE_ID })
+        connection.execute_batch(
+            "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;",
+        )?;
+        let version =
+            connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
+        if usize::try_from(version).map_or(true, |value| value > MIGRATIONS.len()) {
+            return Err(BrokerError::UnsupportedSchema);
+        }
+        for (index, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(migration)?;
+            transaction.pragma_update(None, "user_version", index + 1)?;
+            transaction.commit()?;
+        }
+        let integrity: String =
+            connection.pragma_query_value(None, "quick_check", |row| row.get(0))?;
+        if integrity != "ok" {
+            return Err(BrokerError::CorruptState);
+        }
+        Ok(Self {
+            connection,
+            device_id: LOCAL_DEVICE_ID,
+        })
+    }
+
+    /// Opens a private durable database, rejecting symlinks and group/world access.
+    pub fn open(path: &Path) -> Result<Self, BrokerError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(0o400_000)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() || metadata.mode() & 0o077 != 0 {
+            return Err(BrokerError::UnsafeFile);
+        }
+        drop(file);
+        Self::from_connection(Connection::open(path)?)
+    }
+
+    /// Starts a new boot epoch and expires work whose monotonic deadline cannot
+    /// safely survive the reboot. Executing work is left for reconciliation.
+    pub fn start_boot(&mut self, boot_epoch: u64) -> Result<usize, BrokerError> {
+        let epoch = i64::try_from(boot_epoch).map_err(|_| BrokerError::NumericOutOfRange)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous: i64 = transaction.query_row(
+            "SELECT boot_epoch FROM broker_metadata WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let changed = if previous == epoch {
+            0
+        } else {
+            let changed = transaction.execute(
+                "UPDATE requests SET state = 'expired' WHERE state IN ('planning','pending','approved') AND boot_epoch != ?1",
+                [epoch],
+            )?;
+            transaction.execute(
+                "UPDATE broker_metadata SET boot_epoch = ?1 WHERE singleton = 1",
+                [epoch],
+            )?;
+            changed
+        };
+        transaction.commit()?;
+        Ok(changed)
     }
 
     /// Inserts a policy-approved `planning` request or recovers an exact retry.
@@ -396,9 +456,13 @@ impl BrokerStore {
             return Err(BrokerError::PolicyDenied);
         }
 
-        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let digest = input_digest(&request.package_name);
-        if let Some(existing) = lookup_idempotency(&transaction, request.requester_uid, &request.operation_key)? {
+        if let Some(existing) =
+            lookup_idempotency(&transaction, request.requester_uid, &request.operation_key)?
+        {
             if existing.input_digest == digest {
                 transaction.commit()?;
                 return Ok(SubmitOutcome::Existing(existing.summary));
@@ -459,9 +523,14 @@ impl BrokerStore {
         next: RequestState,
     ) -> Result<RequestState, BrokerError> {
         if !expected.permits(next) {
-            return Err(BrokerError::InvalidTransition { from: expected, to: next });
+            return Err(BrokerError::InvalidTransition {
+                from: expected,
+                to: next,
+            });
         }
-        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let changed = transaction.execute(
             "UPDATE requests SET state = ?1 WHERE request_id = ?2 AND state = ?3",
             params![next.as_db(), request_id.as_str(), expected.as_db()],
@@ -482,12 +551,20 @@ impl BrokerStore {
                 Ok((sequence, digest))
             },
         )?;
-        let sequence = u64::try_from(sequence).map_err(|_| BrokerError::NumericOutOfRange)?.saturating_add(1);
+        let sequence = u64::try_from(sequence)
+            .map_err(|_| BrokerError::NumericOutOfRange)?
+            .saturating_add(1);
         let previous_event_digest: Digest = previous_event_digest
             .try_into()
             .map_err(|_| BrokerError::CorruptState)?;
         let reason = transition_reason(next);
-        let event_digest = lifecycle_event_digest(request_id, sequence, Some(previous_event_digest), next, reason);
+        let event_digest = lifecycle_event_digest(
+            request_id,
+            sequence,
+            Some(previous_event_digest),
+            next,
+            reason,
+        );
         transaction.execute(
             "INSERT INTO request_events (request_id, sequence, state, reason, previous_event_digest, event_digest)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -550,7 +627,8 @@ impl BrokerStore {
                 reason: transition_reason_from_code(reason)?,
                 event_digest,
             })
-        }).collect()
+        })
+        .collect()
     }
 }
 
@@ -584,7 +662,10 @@ fn lookup_idempotency(
         .map_err(BrokerError::from)
 }
 
-fn request_state(transaction: &Transaction<'_>, request_id: &PublicId) -> Result<Option<RequestState>, BrokerError> {
+fn request_state(
+    transaction: &Transaction<'_>,
+    request_id: &PublicId,
+) -> Result<Option<RequestState>, BrokerError> {
     transaction
         .query_row(
             "SELECT state FROM requests WHERE request_id = ?1",
@@ -603,7 +684,9 @@ fn summary_from_values(
 ) -> Result<RequestSummary, BrokerError> {
     Ok(RequestSummary {
         request_id,
-        requester_uid: RequesterUid(u32::try_from(requester_uid).map_err(|_| BrokerError::NumericOutOfRange)?),
+        requester_uid: RequesterUid(
+            u32::try_from(requester_uid).map_err(|_| BrokerError::NumericOutOfRange)?,
+        ),
         state: RequestState::from_db(state)?,
         generation: u64::try_from(generation).map_err(|_| BrokerError::NumericOutOfRange)?,
     })
@@ -653,14 +736,33 @@ pub struct FrozenPlan {
 
 impl FrozenPlan {
     /// Constructs a deterministic fake-plan projection for M2 tests.
-    pub fn fake(package_name: PackageName, manifest_digest: Digest, action_count: u32) -> Result<Self, PlannerError> {
+    pub fn fake(
+        package_name: PackageName,
+        manifest_digest: Digest,
+        action_count: u32,
+    ) -> Result<Self, PlannerError> {
         let view = CborValue::Map(vec![
-            (CborValue::Unsigned(1), CborValue::Text(package_name.as_str().to_owned())),
-            (CborValue::Unsigned(2), CborValue::Bytes(manifest_digest.to_vec())),
-            (CborValue::Unsigned(3), CborValue::Unsigned(u64::from(action_count))),
+            (
+                CborValue::Unsigned(1),
+                CborValue::Text(package_name.as_str().to_owned()),
+            ),
+            (
+                CborValue::Unsigned(2),
+                CborValue::Bytes(manifest_digest.to_vec()),
+            ),
+            (
+                CborValue::Unsigned(3),
+                CborValue::Unsigned(u64::from(action_count)),
+            ),
         ]);
-        let plan_digest = digest_cbor(Domain::AptPlan, &view).map_err(|_| PlannerError::Canonicalization)?;
-        Ok(Self { package_name, manifest_digest, plan_digest, action_count })
+        let plan_digest =
+            digest_cbor(Domain::AptPlan, &view).map_err(|_| PlannerError::Canonicalization)?;
+        Ok(Self {
+            package_name,
+            manifest_digest,
+            plan_digest,
+            action_count,
+        })
     }
 }
 
@@ -689,7 +791,9 @@ pub struct FakePlanner {
 impl FakePlanner {
     #[must_use]
     pub fn with_outcomes(outcomes: impl IntoIterator<Item = (PackageName, PlanOutcome)>) -> Self {
-        Self { outcomes: outcomes.into_iter().collect() }
+        Self {
+            outcomes: outcomes.into_iter().collect(),
+        }
     }
 }
 
@@ -895,8 +999,12 @@ impl LifecycleRecord {
                 self.plan = Some(plan);
                 self.winner(RequestState::Pending, TransitionReason::PlannerPending);
             }
-            PlanOutcome::NoChange { .. } => self.winner(RequestState::NoChange, TransitionReason::PlannerNoChange),
-            PlanOutcome::Invalid { .. } => self.winner(RequestState::Invalid, TransitionReason::PlannerInvalid),
+            PlanOutcome::NoChange { .. } => {
+                self.winner(RequestState::NoChange, TransitionReason::PlannerNoChange)
+            }
+            PlanOutcome::Invalid { .. } => {
+                self.winner(RequestState::Invalid, TransitionReason::PlannerInvalid)
+            }
         }
         Ok(self.state)
     }
@@ -929,7 +1037,11 @@ impl LifecycleRecord {
 
     /// Cancels only before execution. A cancelled request cannot later be
     /// approved or handed to the helper.
-    pub fn cancel(&mut self, now_mono_ns: u64, active_generation: u64) -> Result<RequestState, LifecycleError> {
+    pub fn cancel(
+        &mut self,
+        now_mono_ns: u64,
+        active_generation: u64,
+    ) -> Result<RequestState, LifecycleError> {
         self.pre_execution_guard(now_mono_ns, active_generation)?;
         if !matches!(self.state, RequestState::Pending | RequestState::Approved) {
             return Err(self.state_error());
@@ -940,7 +1052,11 @@ impl LifecycleRecord {
 
     /// The sole authorization-to-execution transition. A generation change or
     /// expiry always wins before this can reach the helper boundary.
-    pub fn begin_execution(&mut self, now_mono_ns: u64, active_generation: u64) -> Result<RequestState, LifecycleError> {
+    pub fn begin_execution(
+        &mut self,
+        now_mono_ns: u64,
+        active_generation: u64,
+    ) -> Result<RequestState, LifecycleError> {
         self.pre_execution_guard(now_mono_ns, active_generation)?;
         if self.state != RequestState::Approved {
             return Err(self.state_error());
@@ -950,14 +1066,24 @@ impl LifecycleRecord {
     }
 
     /// Records a helper-proved outcome. It intentionally has no retry path.
-    pub fn finish_execution(&mut self, succeeded: bool, recovery_required: bool) -> Result<RequestState, LifecycleError> {
+    pub fn finish_execution(
+        &mut self,
+        succeeded: bool,
+        recovery_required: bool,
+    ) -> Result<RequestState, LifecycleError> {
         if self.state != RequestState::Executing {
             return Err(self.state_error());
         }
         match (succeeded, recovery_required) {
-            (true, false) => self.winner(RequestState::Succeeded, TransitionReason::ExecutionSucceeded),
+            (true, false) => self.winner(
+                RequestState::Succeeded,
+                TransitionReason::ExecutionSucceeded,
+            ),
             (false, false) => self.winner(RequestState::Failed, TransitionReason::ExecutionFailed),
-            (false, true) => self.winner(RequestState::RecoveryRequired, TransitionReason::RecoveryRequired),
+            (false, true) => self.winner(
+                RequestState::RecoveryRequired,
+                TransitionReason::RecoveryRequired,
+            ),
             (true, true) => return Err(LifecycleError::InvalidState { state: self.state }),
         }
         Ok(self.state)
@@ -970,22 +1096,33 @@ impl LifecycleRecord {
             return Err(self.state_error());
         }
         if succeeded {
-            self.winner(RequestState::Succeeded, TransitionReason::ReconciledSucceeded);
+            self.winner(
+                RequestState::Succeeded,
+                TransitionReason::ReconciledSucceeded,
+            );
         } else {
             self.winner(RequestState::Failed, TransitionReason::ReconciledFailed);
         }
         Ok(self.state)
     }
 
-    fn pre_execution_guard(&mut self, now_mono_ns: u64, active_generation: u64) -> Result<(), LifecycleError> {
+    fn pre_execution_guard(
+        &mut self,
+        now_mono_ns: u64,
+        active_generation: u64,
+    ) -> Result<(), LifecycleError> {
         if self.state.is_terminal() {
             return Err(LifecycleError::AlreadyTerminal);
         }
-        if matches!(self.state, RequestState::Pending | RequestState::Approved) && now_mono_ns >= self.deadline_mono_ns {
+        if matches!(self.state, RequestState::Pending | RequestState::Approved)
+            && now_mono_ns >= self.deadline_mono_ns
+        {
             self.winner(RequestState::Expired, TransitionReason::Expired);
             return Err(LifecycleError::AlreadyTerminal);
         }
-        if matches!(self.state, RequestState::Pending | RequestState::Approved) && active_generation != self.generation {
+        if matches!(self.state, RequestState::Pending | RequestState::Approved)
+            && active_generation != self.generation
+        {
             self.winner(RequestState::Stale, TransitionReason::GenerationStale);
             return Err(LifecycleError::AlreadyTerminal);
         }
@@ -993,7 +1130,11 @@ impl LifecycleRecord {
     }
 
     fn state_error(&self) -> LifecycleError {
-        if self.state.is_terminal() { LifecycleError::AlreadyTerminal } else { LifecycleError::InvalidState { state: self.state } }
+        if self.state.is_terminal() {
+            LifecycleError::AlreadyTerminal
+        } else {
+            LifecycleError::InvalidState { state: self.state }
+        }
     }
 
     fn winner(&mut self, next: RequestState, reason: TransitionReason) {
@@ -1006,15 +1147,35 @@ impl LifecycleRecord {
     }
 
     fn append(&mut self, state: RequestState, reason: TransitionReason) {
-        let sequence = u64::try_from(self.events.len()).unwrap_or(u64::MAX).saturating_add(1);
+        let sequence = u64::try_from(self.events.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
         let previous_event_digest = self.events.last().map(|event| event.event_digest);
-        let event_digest = lifecycle_event_digest(&self.request_id, sequence, previous_event_digest, state, reason);
-        self.events.push(LifecycleEvent { sequence, previous_event_digest, state, reason, event_digest });
+        let event_digest = lifecycle_event_digest(
+            &self.request_id,
+            sequence,
+            previous_event_digest,
+            state,
+            reason,
+        );
+        self.events.push(LifecycleEvent {
+            sequence,
+            previous_event_digest,
+            state,
+            reason,
+            event_digest,
+        });
     }
 
     fn make_receipt(&self) -> ReceiptDraft {
-        let final_event_digest = self.events.last().map_or([0; 32], |event| event.event_digest);
-        let plan_digest = self.plan.as_ref().and_then(|plan| (plan.plan_digest != [0; 32]).then_some(plan.plan_digest));
+        let final_event_digest = self
+            .events
+            .last()
+            .map_or([0; 32], |event| event.event_digest);
+        let plan_digest = self
+            .plan
+            .as_ref()
+            .and_then(|plan| (plan.plan_digest != [0; 32]).then_some(plan.plan_digest));
         let receipt_digest = receipt_digest(
             &self.receipt_id,
             &self.request_id,
@@ -1097,10 +1258,23 @@ mod tests {
     #[test]
     fn package_intake_rejects_versions_urls_paths_flags_and_architectures() {
         for invalid in [
-            "f", "ffmpeg=7", "ffmpeg:amd64", "https://example.test/pkg", "./ffmpeg", "--assume-yes", "ffmpeg;id",
-            "FFmpeg", "ff mpeg", "ffmpeg/../apt", "ffmpeg_1",
+            "f",
+            "ffmpeg=7",
+            "ffmpeg:amd64",
+            "https://example.test/pkg",
+            "./ffmpeg",
+            "--assume-yes",
+            "ffmpeg;id",
+            "FFmpeg",
+            "ff mpeg",
+            "ffmpeg/../apt",
+            "ffmpeg_1",
         ] {
-            assert_eq!(PackageName::parse(invalid), Err(IntakeError::InvalidPackageName), "{invalid}");
+            assert_eq!(
+                PackageName::parse(invalid),
+                Err(IntakeError::InvalidPackageName),
+                "{invalid}"
+            );
         }
         assert_eq!(PackageName::parse("ffmpeg").unwrap().as_str(), "ffmpeg");
         assert_eq!(PackageName::parse("libvpx7").unwrap().as_str(), "libvpx7");
@@ -1123,7 +1297,10 @@ mod tests {
             PackageName::parse("curl").unwrap(),
         ]);
         let initial = request(REQUEST_A, 1000, KEY_A, "ffmpeg");
-        assert!(matches!(store.submit(initial.clone(), &policy).unwrap(), SubmitOutcome::Created(_)));
+        assert!(matches!(
+            store.submit(initial.clone(), &policy).unwrap(),
+            SubmitOutcome::Created(_)
+        ));
 
         let retry = request(REQUEST_B, 1000, KEY_A, "ffmpeg");
         assert_eq!(
@@ -1136,7 +1313,10 @@ mod tests {
             })
         );
         let changed = request(REQUEST_B, 1000, KEY_A, "curl");
-        assert!(matches!(store.submit(changed, &policy), Err(BrokerError::IdempotencyConflict)));
+        assert!(matches!(
+            store.submit(changed, &policy),
+            Err(BrokerError::IdempotencyConflict)
+        ));
     }
 
     #[test]
@@ -1149,9 +1329,21 @@ mod tests {
         let first = request(REQUEST_A, 1000, KEY_A, "ffmpeg");
         let second = request(REQUEST_B, 1001, KEY_B, "curl");
         store.submit(first.clone(), &policy).unwrap();
-        assert!(matches!(store.submit(second.clone(), &policy), Err(BrokerError::Busy { .. })));
-        store.transition(&first.request_id, RequestState::Planning, RequestState::NoChange).unwrap();
-        assert!(matches!(store.submit(second, &policy).unwrap(), SubmitOutcome::Created(_)));
+        assert!(matches!(
+            store.submit(second.clone(), &policy),
+            Err(BrokerError::Busy { .. })
+        ));
+        store
+            .transition(
+                &first.request_id,
+                RequestState::Planning,
+                RequestState::NoChange,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.submit(second, &policy).unwrap(),
+            SubmitOutcome::Created(_)
+        ));
     }
 
     #[test]
@@ -1160,19 +1352,45 @@ mod tests {
         let initial = request(REQUEST_A, 1000, KEY_A, "ffmpeg");
         store.submit(initial.clone(), &allow("ffmpeg")).unwrap();
         assert!(matches!(
-            store.transition(&initial.request_id, RequestState::Pending, RequestState::Approved),
-            Err(BrokerError::LifecycleRaceLost { actual: RequestState::Planning })
+            store.transition(
+                &initial.request_id,
+                RequestState::Pending,
+                RequestState::Approved
+            ),
+            Err(BrokerError::LifecycleRaceLost {
+                actual: RequestState::Planning
+            })
         ));
         assert!(matches!(
-            store.transition(&initial.request_id, RequestState::Planning, RequestState::Executing),
+            store.transition(
+                &initial.request_id,
+                RequestState::Planning,
+                RequestState::Executing
+            ),
             Err(BrokerError::InvalidTransition { .. })
         ));
-        store.transition(&initial.request_id, RequestState::Planning, RequestState::Pending).unwrap();
-        store.transition(&initial.request_id, RequestState::Pending, RequestState::Denied).unwrap();
+        store
+            .transition(
+                &initial.request_id,
+                RequestState::Planning,
+                RequestState::Pending,
+            )
+            .unwrap();
+        store
+            .transition(
+                &initial.request_id,
+                RequestState::Pending,
+                RequestState::Denied,
+            )
+            .unwrap();
         assert!(RequestState::Denied.is_terminal());
         assert!(!RequestState::Denied.permits(RequestState::Approved));
         assert!(matches!(
-            store.transition(&initial.request_id, RequestState::Denied, RequestState::Approved),
+            store.transition(
+                &initial.request_id,
+                RequestState::Denied,
+                RequestState::Approved
+            ),
             Err(BrokerError::InvalidTransition { .. })
         ));
     }
@@ -1182,15 +1400,64 @@ mod tests {
         let mut store = BrokerStore::in_memory().unwrap();
         let initial = request(REQUEST_A, 1000, KEY_A, "ffmpeg");
         store.submit(initial.clone(), &allow("ffmpeg")).unwrap();
-        store.transition(&initial.request_id, RequestState::Planning, RequestState::Pending).unwrap();
-        store.transition(&initial.request_id, RequestState::Pending, RequestState::Denied).unwrap();
+        store
+            .transition(
+                &initial.request_id,
+                RequestState::Planning,
+                RequestState::Pending,
+            )
+            .unwrap();
+        store
+            .transition(
+                &initial.request_id,
+                RequestState::Pending,
+                RequestState::Denied,
+            )
+            .unwrap();
         let events = store.events(&initial.request_id).unwrap();
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].sequence, 1);
         assert_eq!(events[0].previous_event_digest, None);
-        assert_eq!(events[1].previous_event_digest, Some(events[0].event_digest));
-        assert_eq!(events[2].previous_event_digest, Some(events[1].event_digest));
+        assert_eq!(
+            events[1].previous_event_digest,
+            Some(events[0].event_digest)
+        );
+        assert_eq!(
+            events[2].previous_event_digest,
+            Some(events[1].event_digest)
+        );
         assert_eq!(events[2].reason, TransitionReason::Denied);
+    }
+
+    #[test]
+    fn durable_open_migrates_and_reboot_expires_non_executing_work() {
+        let path = std::env::temp_dir().join(format!(
+            "rootpermit-m2-{}-{}.sqlite",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_file(&path);
+        let initial = request(REQUEST_A, 1000, KEY_A, "ffmpeg");
+        {
+            let mut store = BrokerStore::open(&path).unwrap();
+            store.submit(initial.clone(), &allow("ffmpeg")).unwrap();
+            assert_eq!(store.start_boot(7).unwrap(), 1);
+            assert_eq!(
+                store.request(&initial.request_id).unwrap().unwrap().state,
+                RequestState::Expired
+            );
+            assert_eq!(store.start_boot(7).unwrap(), 0);
+        }
+        let reopened = BrokerStore::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .request(&initial.request_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Expired
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1238,8 +1505,16 @@ mod tests {
     #[test]
     fn fake_planner_is_deterministic_and_cannot_change_the_requested_package() {
         let plan = pending_plan();
-        let planner = FakePlanner::with_outcomes([(PackageName::parse("ffmpeg").unwrap(), PlanOutcome::Pending(plan.clone()))]);
-        assert_eq!(planner.plan(&PackageName::parse("ffmpeg").unwrap()).unwrap(), PlanOutcome::Pending(plan));
+        let planner = FakePlanner::with_outcomes([(
+            PackageName::parse("ffmpeg").unwrap(),
+            PlanOutcome::Pending(plan.clone()),
+        )]);
+        assert_eq!(
+            planner
+                .plan(&PackageName::parse("ffmpeg").unwrap())
+                .unwrap(),
+            PlanOutcome::Pending(plan)
+        );
         assert_eq!(
             planner.plan(&PackageName::parse("curl").unwrap()).unwrap(),
             PlanOutcome::Invalid { reason_code: 1 }
@@ -1247,42 +1522,74 @@ mod tests {
 
         let mut record = lifecycle();
         let changed = FrozenPlan::fake(PackageName::parse("curl").unwrap(), [7; 32], 1).unwrap();
-        assert_eq!(record.apply_plan(PlanOutcome::Pending(changed)), Err(LifecycleError::PlannerPackageMismatch));
+        assert_eq!(
+            record.apply_plan(PlanOutcome::Pending(changed)),
+            Err(LifecycleError::PlannerPackageMismatch)
+        );
         assert_eq!(record.state, RequestState::Planning);
     }
 
     #[test]
     fn decision_expiry_cancel_and_generation_have_one_durable_winner() {
         let mut approved = lifecycle();
-        approved.apply_plan(PlanOutcome::Pending(pending_plan())).unwrap();
+        approved
+            .apply_plan(PlanOutcome::Pending(pending_plan()))
+            .unwrap();
         let proof = VerifiedDecision {
-            request_digest: [9; 32], generation: 3, decision: Decision::Approve, assertion_digest: [4; 32],
+            request_digest: [9; 32],
+            generation: 3,
+            decision: Decision::Approve,
+            assertion_digest: [4; 32],
         };
-        assert_eq!(approved.apply_verified_decision(99, 3, &proof).unwrap(), RequestState::Approved);
-        assert_eq!(approved.begin_execution(99, 4), Err(LifecycleError::AlreadyTerminal));
+        assert_eq!(
+            approved.apply_verified_decision(99, 3, &proof).unwrap(),
+            RequestState::Approved
+        );
+        assert_eq!(
+            approved.begin_execution(99, 4),
+            Err(LifecycleError::AlreadyTerminal)
+        );
         assert_eq!(approved.state, RequestState::Stale);
         assert_eq!(approved.cancel(99, 3), Err(LifecycleError::AlreadyTerminal));
 
         let mut expired = lifecycle();
-        expired.apply_plan(PlanOutcome::Pending(pending_plan())).unwrap();
+        expired
+            .apply_plan(PlanOutcome::Pending(pending_plan()))
+            .unwrap();
         assert_eq!(expired.cancel(100, 3), Err(LifecycleError::AlreadyTerminal));
         assert_eq!(expired.state, RequestState::Expired);
 
         let mut denied = lifecycle();
-        denied.apply_plan(PlanOutcome::Pending(pending_plan())).unwrap();
+        denied
+            .apply_plan(PlanOutcome::Pending(pending_plan()))
+            .unwrap();
         let deny = VerifiedDecision {
-            request_digest: [9; 32], generation: 3, decision: Decision::Deny, assertion_digest: [5; 32],
+            request_digest: [9; 32],
+            generation: 3,
+            decision: Decision::Deny,
+            assertion_digest: [5; 32],
         };
-        assert_eq!(denied.apply_verified_decision(99, 3, &deny).unwrap(), RequestState::Denied);
-        assert_eq!(denied.apply_verified_decision(99, 3, &proof), Err(LifecycleError::AlreadyTerminal));
+        assert_eq!(
+            denied.apply_verified_decision(99, 3, &deny).unwrap(),
+            RequestState::Denied
+        );
+        assert_eq!(
+            denied.apply_verified_decision(99, 3, &proof),
+            Err(LifecycleError::AlreadyTerminal)
+        );
     }
 
     #[test]
     fn terminal_receipt_draft_commits_to_the_event_chain_without_claiming_a_signature() {
         let mut record = lifecycle();
-        record.apply_plan(PlanOutcome::Pending(pending_plan())).unwrap();
+        record
+            .apply_plan(PlanOutcome::Pending(pending_plan()))
+            .unwrap();
         let proof = VerifiedDecision {
-            request_digest: [9; 32], generation: 3, decision: Decision::Approve, assertion_digest: [4; 32],
+            request_digest: [9; 32],
+            generation: 3,
+            decision: Decision::Approve,
+            assertion_digest: [4; 32],
         };
         record.apply_verified_decision(99, 3, &proof).unwrap();
         record.begin_execution(99, 3).unwrap();
@@ -1292,8 +1599,16 @@ mod tests {
         let receipt = record.receipt.clone().unwrap();
         assert_eq!(receipt.terminal_state, RequestState::Failed);
         assert_eq!(receipt.plan_digest, Some(pending_plan().plan_digest));
-        assert_eq!(receipt.final_event_digest, record.events.last().unwrap().event_digest);
-        assert!(record.events.windows(2).all(|events| events[1].previous_event_digest == Some(events[0].event_digest)));
+        assert_eq!(
+            receipt.final_event_digest,
+            record.events.last().unwrap().event_digest
+        );
+        assert!(
+            record
+                .events
+                .windows(2)
+                .all(|events| events[1].previous_event_digest == Some(events[0].event_digest))
+        );
         assert_ne!(receipt.receipt_digest, [0; 32]);
     }
 }

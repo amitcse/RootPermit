@@ -26,5 +26,5 @@ fn main() {
 }
 
 fn utf8_arguments(arguments: Vec<OsString>) -> Option<Vec<String>> {
-    arguments.into_iter().map(OsString::into_string).collect()
+    arguments.into_iter().map(|argument| argument.into_string().ok()).collect()
 }

@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 rp-protocol = { path = "../rp-protocol" }
 thiserror = "2.0.12"
+rp-peercred = { path = "../rp-peercred" }
 
 [lints]
 workspace = true

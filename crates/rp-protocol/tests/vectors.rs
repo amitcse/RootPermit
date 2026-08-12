@@ -112,14 +112,14 @@ fn negative_vectors_fail_closed() {
     assert_eq!(manifest.version, 1);
     for vector in manifest.vectors {
         let bytes = hex::decode(&vector.cbor_hex).unwrap();
-        let result = match vector.target.as_str() {
-            "cbor" => decode(&bytes).map(|_| ()),
-            "Request" => Request::decode(&bytes).map(|_| ()),
-            "DecisionSubmission" => DecisionSubmission::decode(&bytes).map(|_| ()),
-            "CoseSign1" => CoseSign1::decode(&bytes).map(|_| ()),
+        let rejected = match vector.target.as_str() {
+            "cbor" => decode(&bytes).is_err(),
+            "Request" => Request::decode(&bytes).is_err(),
+            "DecisionSubmission" => DecisionSubmission::decode(&bytes).is_err(),
+            "CoseSign1" => CoseSign1::decode(&bytes).is_err(),
             target => panic!("{}: unsupported negative vector target {target}", vector.name),
         };
-        assert!(result.is_err(), "{} ({}) unexpectedly decoded", vector.name, vector.error);
+        assert!(rejected, "{} ({}) unexpectedly decoded", vector.name, vector.error);
     }
 }
 
