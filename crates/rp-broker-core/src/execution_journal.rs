@@ -118,7 +118,10 @@ impl ExecutionJournal {
         let markers = records(&contents)?;
         let final_state = markers.last().copied() == Some(JournalMarker::FinalStateCommitted);
         let Some(result_index) = markers.iter().position(|marker| {
-            matches!(marker, JournalMarker::ResultSucceeded | JournalMarker::ResultFailed)
+            matches!(
+                marker,
+                JournalMarker::ResultSucceeded | JournalMarker::ResultFailed
+            )
         }) else {
             return Ok(RecoveryClassification::RecoveryRequired);
         };
