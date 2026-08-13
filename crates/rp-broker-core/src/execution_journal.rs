@@ -117,15 +117,34 @@ impl ExecutionJournal {
         }
         let markers = records(&contents)?;
         let final_state = markers.last().copied() == Some(JournalMarker::FinalStateCommitted);
-        let receipt = markers.iter().any(|marker| *marker == JournalMarker::ReceiptCreated);
-        if !final_state || !receipt {
+        let Some(result_index) = markers.iter().position(|marker| {
+            matches!(marker, JournalMarker::ResultSucceeded | JournalMarker::ResultFailed)
+        }) else {
+            return Ok(RecoveryClassification::RecoveryRequired);
+        };
+        let expected_prefix = [
+            JournalMarker::HelperHandoff,
+            JournalMarker::SimulationProved,
+            JournalMarker::ExecutionStarted,
+        ];
+        let receipt_after_result = markers
+            .iter()
+            .skip(result_index + 1)
+            .any(|marker| *marker == JournalMarker::ReceiptCreated);
+        if !final_state || !markers.starts_with(&expected_prefix) || !receipt_after_result {
             return Ok(RecoveryClassification::RecoveryRequired);
         }
-        let succeeded = markers.iter().any(|marker| *marker == JournalMarker::ResultSucceeded);
-        let failed = markers.iter().any(|marker| *marker == JournalMarker::ResultFailed);
+        let succeeded = markers
+            .iter()
+            .filter(|marker| **marker == JournalMarker::ResultSucceeded)
+            .count();
+        let failed = markers
+            .iter()
+            .filter(|marker| **marker == JournalMarker::ResultFailed)
+            .count();
         match (succeeded, failed) {
-            (true, false) => Ok(RecoveryClassification::Succeeded),
-            (false, true) => Ok(RecoveryClassification::Failed),
+            (1, 0) => Ok(RecoveryClassification::Succeeded),
+            (0, 1) => Ok(RecoveryClassification::Failed),
             _ => Ok(RecoveryClassification::RecoveryRequired),
         }
     }
@@ -141,7 +160,8 @@ fn parse_records(contents: &[u8]) -> Result<u64, JournalError> {
     }
     let mut expected = 1_u64;
     for record in remainder.chunks_exact(RECORD_BYTES) {
-        let sequence = u64::from_be_bytes(record[..8].try_into().map_err(|_| JournalError::Corrupt)?);
+        let sequence =
+            u64::from_be_bytes(record[..8].try_into().map_err(|_| JournalError::Corrupt)?);
         let marker = JournalMarker::from_byte(record[8]).ok_or(JournalError::Corrupt)?;
         if sequence != expected || record[9] != checksum(sequence, marker as u8) {
             return Err(JournalError::Corrupt);
@@ -184,11 +204,17 @@ mod tests {
         journal.append(JournalMarker::HelperHandoff).unwrap();
         journal.append(JournalMarker::SimulationProved).unwrap();
         journal.append(JournalMarker::ExecutionStarted).unwrap();
-        assert_eq!(ExecutionJournal::classify(&path).unwrap(), RecoveryClassification::RecoveryRequired);
+        assert_eq!(
+            ExecutionJournal::classify(&path).unwrap(),
+            RecoveryClassification::RecoveryRequired
+        );
         journal.append(JournalMarker::ResultSucceeded).unwrap();
         journal.append(JournalMarker::ReceiptCreated).unwrap();
         journal.append(JournalMarker::FinalStateCommitted).unwrap();
-        assert_eq!(ExecutionJournal::classify(&path).unwrap(), RecoveryClassification::Succeeded);
+        assert_eq!(
+            ExecutionJournal::classify(&path).unwrap(),
+            RecoveryClassification::Succeeded
+        );
         std::fs::remove_file(path).unwrap();
     }
 
@@ -201,7 +227,24 @@ mod tests {
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.push(1);
         std::fs::write(&path, bytes).unwrap();
-        assert!(matches!(ExecutionJournal::classify(&path), Err(JournalError::Corrupt)));
+        assert!(matches!(
+            ExecutionJournal::classify(&path),
+            Err(JournalError::Corrupt)
+        ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn terminal_markers_without_a_proven_execution_are_not_success() {
+        let path = path();
+        let mut journal = ExecutionJournal::open(&path).unwrap();
+        journal.append(JournalMarker::ResultSucceeded).unwrap();
+        journal.append(JournalMarker::ReceiptCreated).unwrap();
+        journal.append(JournalMarker::FinalStateCommitted).unwrap();
+        assert_eq!(
+            ExecutionJournal::classify(&path).unwrap(),
+            RecoveryClassification::RecoveryRequired
+        );
         std::fs::remove_file(path).unwrap();
     }
 }

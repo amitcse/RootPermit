@@ -172,7 +172,10 @@ impl SealedPlanStore {
             .open(child_path(&self.objects, &digest))?;
         file.write_all(&object.bytes)?;
         file.sync_all()?;
-        fs::set_permissions(child_path(&self.objects, &digest), fs::Permissions::from_mode(0o400))?;
+        fs::set_permissions(
+            child_path(&self.objects, &digest),
+            fs::Permissions::from_mode(0o400),
+        )?;
         drop(file);
         let file = open_child_file(&self.objects, &digest, false)?;
         verify_immutable_file(&file, self.expected_uid, &digest)?;
@@ -218,7 +221,10 @@ impl SealedPlanStore {
             .open(child_path(&plan, MANIFEST_NAME))?;
         manifest_file.write_all(manifest)?;
         manifest_file.sync_all()?;
-        fs::set_permissions(child_path(&plan, MANIFEST_NAME), fs::Permissions::from_mode(0o400))?;
+        fs::set_permissions(
+            child_path(&plan, MANIFEST_NAME),
+            fs::Permissions::from_mode(0o400),
+        )?;
         drop(manifest_file);
         let manifest_file = open_child_file(&plan, MANIFEST_NAME, false)?;
         validate_manifest_file(&manifest_file, self.expected_uid)?;
@@ -232,8 +238,13 @@ impl SealedPlanStore {
     /// Reopens a previously sealed plan by descriptor-relative opaque handle.
     /// It is used only for a root-controlled recovery inspection.
     pub fn handoff(&self, handle: PlanHandle) -> Result<SealedPlanHandoff, SealedPlanError> {
-        let plan = open_child_directory(&self.plans, handle.as_str())
-            .map_err(|error| if error.kind() == std::io::ErrorKind::NotFound { SealedPlanError::PlanMissing } else { SealedPlanError::Io(error) })?;
+        let plan = open_child_directory(&self.plans, handle.as_str()).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                SealedPlanError::PlanMissing
+            } else {
+                SealedPlanError::Io(error)
+            }
+        })?;
         validate_directory(&plan, self.expected_uid, 0o077)?;
         let manifest = open_child_file(&plan, MANIFEST_NAME, false)?;
         validate_manifest_file(&manifest, self.expected_uid)?;
@@ -261,7 +272,10 @@ fn open_directory(path: &Path) -> Result<File, std::io::Error> {
 
 fn open_child_directory(parent: &File, name: &str) -> Result<File, std::io::Error> {
     if !is_safe_component(name) {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "unsafe directory component"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsafe directory component",
+        ));
     }
     OpenOptions::new()
         .read(true)
@@ -271,7 +285,10 @@ fn open_child_directory(parent: &File, name: &str) -> Result<File, std::io::Erro
 
 fn open_child_file(parent: &File, name: &str, write: bool) -> Result<File, std::io::Error> {
     if !is_safe_component(name) {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "unsafe file component"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsafe file component",
+        ));
     }
     OpenOptions::new()
         .read(true)
@@ -292,12 +309,21 @@ fn ensure_directory(parent: &File, name: &str, expected_uid: u32) -> Result<(), 
 }
 
 fn child_path(parent: &File, component: &str) -> PathBuf {
-    PathBuf::from(format!("/proc/self/fd/{}/{}", parent.as_raw_fd(), component))
+    PathBuf::from(format!(
+        "/proc/self/fd/{}/{}",
+        parent.as_raw_fd(),
+        component
+    ))
 }
 
-fn validate_directory(file: &File, expected_uid: u32, forbidden_mode: u32) -> Result<(), SealedPlanError> {
+fn validate_directory(
+    file: &File,
+    expected_uid: u32,
+    forbidden_mode: u32,
+) -> Result<(), SealedPlanError> {
     let metadata = file.metadata()?;
-    if !metadata.is_dir() || metadata.uid() != expected_uid || metadata.mode() & forbidden_mode != 0 {
+    if !metadata.is_dir() || metadata.uid() != expected_uid || metadata.mode() & forbidden_mode != 0
+    {
         return Err(SealedPlanError::UnsafeRoot);
     }
     Ok(())
@@ -316,7 +342,11 @@ fn validate_manifest_file(file: &File, expected_uid: u32) -> Result<(), SealedPl
     Ok(())
 }
 
-fn verify_immutable_file(file: &File, expected_uid: u32, expected_digest: &str) -> Result<(), SealedPlanError> {
+fn verify_immutable_file(
+    file: &File,
+    expected_uid: u32,
+    expected_digest: &str,
+) -> Result<(), SealedPlanError> {
     let metadata = file.metadata()?;
     if !metadata.is_file()
         || metadata.uid() != expected_uid
@@ -338,7 +368,9 @@ fn verify_immutable_file(file: &File, expected_uid: u32, expected_digest: &str) 
 fn is_safe_component(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
-        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
         && value != "."
         && value != ".."
 }
@@ -387,13 +419,22 @@ mod tests {
     fn seals_content_by_digest_and_reopens_only_an_opaque_plan_handle() {
         let root = temporary_root();
         let store = store(&root);
-        let digest = store.put_object(&SealedObject { bytes: b"sealed archive".to_vec() }).unwrap();
+        let digest = store
+            .put_object(&SealedObject {
+                bytes: b"sealed archive".to_vec(),
+            })
+            .unwrap();
         let handle = PlanHandle::parse("AQEBAQEBAQEBAQEBAQEBAQ").unwrap();
-        let handoff = store.seal_plan(handle.clone(), b"canonical manifest", &[digest]).unwrap();
+        let handoff = store
+            .seal_plan(handle.clone(), b"canonical manifest", &[digest])
+            .unwrap();
         assert!(handoff.plan_root_fd() >= 0);
         assert!(handoff.content_store_fd() >= 0);
         drop(handoff);
-        assert_eq!(store.handoff(handle).unwrap().handle.as_str(), "AQEBAQEBAQEBAQEBAQEBAQ");
+        assert_eq!(
+            store.handoff(handle).unwrap().handle.as_str(),
+            "AQEBAQEBAQEBAQEBAQEBAQ"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -401,13 +442,31 @@ mod tests {
     fn rejects_hardlinks_post_seal_mutation_and_path_traversal() {
         let root = temporary_root();
         let store = store(&root);
-        let digest = store.put_object(&SealedObject { bytes: b"a".to_vec() }).unwrap();
+        let digest = store
+            .put_object(&SealedObject {
+                bytes: b"a".to_vec(),
+            })
+            .unwrap();
         let object_path = root.join("sha256").join(&digest);
         fs::set_permissions(&object_path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(matches!(store.seal_plan(PlanHandle::parse("AgICAgICAgICAgICAgICAg").unwrap(), b"m", &[digest.clone()]), Err(SealedPlanError::UnsafeRoot)));
+        assert!(matches!(
+            store.seal_plan(
+                PlanHandle::parse("AgICAgICAgICAgICAgICAg").unwrap(),
+                b"m",
+                &[digest.clone()]
+            ),
+            Err(SealedPlanError::UnsafeRoot)
+        ));
         fs::set_permissions(&object_path, fs::Permissions::from_mode(0o400)).unwrap();
         fs::hard_link(&object_path, root.join("copy")).unwrap();
-        assert!(matches!(store.seal_plan(PlanHandle::parse("AwMDAwMDAwMDAwMDAwMDAw").unwrap(), b"m", &[digest]), Err(SealedPlanError::UnsafeRoot)));
+        assert!(matches!(
+            store.seal_plan(
+                PlanHandle::parse("AwMDAwMDAwMDAwMDAwMDAw").unwrap(),
+                b"m",
+                &[digest]
+            ),
+            Err(SealedPlanError::UnsafeRoot)
+        ));
         assert!(PlanHandle::parse("../../not-a-plan").is_err());
         fs::remove_dir_all(root).unwrap();
     }

@@ -17,6 +17,7 @@ namespace {
 constexpr std::array<std::string_view, 2> kAllowedEnvironment{
     "LANG=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"};
 constexpr std::size_t kMaxManifestBytes = 1U << 20U;
+constexpr std::size_t kMaxObjectBytes = 128U << 20U;
 constexpr std::size_t kMaxGraphActions = 16'384;
 constexpr std::size_t kMaxInputs = 16'384;
 
@@ -157,14 +158,16 @@ class Sha256 {
   return different == 0;
 }
 
-[[nodiscard]] bool safe_regular_file(const struct stat& metadata) noexcept {
+[[nodiscard]] bool safe_regular_file(const struct stat& metadata,
+                                     const std::size_t maximum_bytes) noexcept {
   return S_ISREG(metadata.st_mode) && metadata.st_uid == 0 &&
          (metadata.st_mode & 0222U) == 0U && metadata.st_nlink == 1 &&
          metadata.st_size >= 0 &&
-         static_cast<std::uint64_t>(metadata.st_size) <= kMaxManifestBytes;
+         static_cast<std::uint64_t>(metadata.st_size) <= maximum_bytes;
 }
 
-[[nodiscard]] bool read_fd(const int fd, std::vector<std::uint8_t>* output) noexcept {
+[[nodiscard]] bool read_fd(const int fd, std::vector<std::uint8_t>* output,
+                           const std::size_t maximum_bytes) noexcept {
   output->clear();
   std::array<std::uint8_t, 8192> buffer{};
   while (true) {
@@ -174,7 +177,7 @@ class Sha256 {
       if (errno == EINTR) continue;
       return false;
     }
-    if (output->size() > kMaxManifestBytes - static_cast<std::size_t>(count)) return false;
+    if (output->size() > maximum_bytes - static_cast<std::size_t>(count)) return false;
     output->insert(output->end(), buffer.begin(), buffer.begin() + count);
   }
 }
@@ -446,12 +449,13 @@ SealedPlanError verify_sealed_plan(const int plan_root_fd, const int content_sto
   const auto manifest_fd = open_sealed_child(plan_root_fd, "manifest.cbor");
   if (manifest_fd < 0) return errno == ENOENT ? SealedPlanError::manifest_missing : SealedPlanError::io_failure;
   struct stat manifest_metadata {};
-  if (::fstat(manifest_fd, &manifest_metadata) != 0 || !safe_regular_file(manifest_metadata)) {
+  if (::fstat(manifest_fd, &manifest_metadata) != 0 ||
+      !safe_regular_file(manifest_metadata, kMaxManifestBytes)) {
     ::close(manifest_fd);
     return SealedPlanError::manifest_unsafe;
   }
   std::vector<std::uint8_t> encoded_manifest;
-  const auto read_manifest = read_fd(manifest_fd, &encoded_manifest);
+  const auto read_manifest = read_fd(manifest_fd, &encoded_manifest, kMaxManifestBytes);
   ::close(manifest_fd);
   if (!read_manifest) return SealedPlanError::io_failure;
   if (!constant_time_equal(sha256(encoded_manifest), manifest_digest)) {
@@ -466,12 +470,12 @@ SealedPlanError verify_sealed_plan(const int plan_root_fd, const int content_sto
     const auto object_fd = open_sealed_child(content_store_fd, name);
     if (object_fd < 0) return errno == ENOENT ? SealedPlanError::input_missing : SealedPlanError::io_failure;
     struct stat metadata {};
-    if (::fstat(object_fd, &metadata) != 0 || !safe_regular_file(metadata)) {
+    if (::fstat(object_fd, &metadata) != 0 || !safe_regular_file(metadata, kMaxObjectBytes)) {
       ::close(object_fd);
       return SealedPlanError::input_unsafe;
     }
     std::vector<std::uint8_t> bytes;
-    const auto read_object = read_fd(object_fd, &bytes);
+    const auto read_object = read_fd(object_fd, &bytes, kMaxObjectBytes);
     ::close(object_fd);
     if (!read_object) return SealedPlanError::io_failure;
     if (!constant_time_equal(sha256(bytes), input.digest)) return SealedPlanError::input_digest_mismatch;
