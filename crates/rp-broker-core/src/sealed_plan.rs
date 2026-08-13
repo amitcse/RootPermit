@@ -433,9 +433,14 @@ mod tests {
         assert!(handoff.content_store_fd() >= 0);
         drop(handoff);
         assert_eq!(
-            store.handoff(handle).unwrap().handle.as_str(),
+            store.handoff(handle.clone()).unwrap().handle.as_str(),
             "AQEBAQEBAQEBAQEBAQEBAQ"
         );
+        fs::set_permissions(
+            root.join("plans").join(handle.as_str()),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
