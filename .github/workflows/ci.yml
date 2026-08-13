@@ -68,9 +68,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - name: Exercise kernel peer credentials from a second Linux UID
-        run: sudo -E env "PATH=$PATH" cargo test -p rp-broker-api peer_uid_comes_from_a_real_nonroot_process -- --exact
+        run: sudo -E env "PATH=$PATH" cargo test -p rp-broker-api tests::peer_uid_comes_from_a_real_nonroot_process -- --exact
       - name: Exercise root-owned durable broker storage
-        run: sudo -E env "PATH=$PATH" cargo test -p rp-broker-core durable_open_migrates_and_reboot_expires_non_executing_work -- --ignored --exact
+        run: sudo -E env "PATH=$PATH" cargo test -p rp-broker-core tests::durable_open_migrates_and_reboot_expires_non_executing_work -- --ignored --exact
       - run: cmake -S helper/apt-helper -B build/apt-helper -DBUILD_TESTING=ON
       - run: cmake --build build/apt-helper --parallel
       - run: ctest --test-dir build/apt-helper --output-on-failure

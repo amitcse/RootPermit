@@ -967,7 +967,7 @@ mod tests {
                 "--clear-groups",
                 test_binary.to_str().unwrap(),
                 "--exact",
-                "peer_uid_comes_from_a_real_nonroot_process",
+                "tests::peer_uid_comes_from_a_real_nonroot_process",
             ])
             .env("ROOTPERMIT_PEERCRED_CHILD_SOCKET", &path)
             .spawn()

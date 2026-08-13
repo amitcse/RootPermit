@@ -12,10 +12,16 @@ or APT flags.
 
 ## Status
 
-Implementation has begun with the repository foundation and protocol
-conformance work. M4 (real APT execution) and M5 (multi-tenant hosted alpha)
-are evidence gates, not feature flags. They are not complete until their
-pinned-VM and PostgreSQL adversarial suites have passed.
+The M3 control-plane contracts are implemented and tested: a root-created
+device pairing, hosted account session, verified approval presentation,
+broker-verifiable decision relay, revocation quarantine, and fake-execution
+projection. This is not the M3 exit gate: the current runtime is an in-memory
+contract harness, so a durable hosted adapter and a real broker/relay/browser
+end-to-end test remain required before claiming a deployable M3 path.
+
+It does not perform real package installation or make a multi-tenant hosted
+alpha claim. M4 (real APT execution) and M5 (multi-tenant hosted alpha) remain
+evidence gates until their pinned-VM and PostgreSQL adversarial suites pass.
 
 ## Layout
 
