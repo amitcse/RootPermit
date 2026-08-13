@@ -114,6 +114,29 @@ struct ImmutableObjectMetadata {
 [[nodiscard]] std::string_view immutable_input_error_name(
     ImmutableInputError error) noexcept;
 
+enum class SealedPlanError {
+  none,
+  manifest_missing,
+  manifest_unsafe,
+  manifest_digest_mismatch,
+  manifest_invalid,
+  input_missing,
+  input_unsafe,
+  input_digest_mismatch,
+  io_failure,
+};
+
+struct PlanManifest;
+
+// Validates the complete descriptor-relative input set before libapt-pkg may
+// initialise. `plan_root_fd` and `content_store_fd` are broker-inherited
+// directory FDs, while `manifest_digest` is authenticated by the fixed control
+// protocol. There is deliberately no path parameter in this interface.
+[[nodiscard]] SealedPlanError verify_sealed_plan(
+    int plan_root_fd, int content_store_fd, const Digest& manifest_digest,
+    PlanManifest* manifest) noexcept;
+[[nodiscard]] std::string_view sealed_plan_error_name(SealedPlanError error) noexcept;
+
 enum class PackageActionKind : std::uint64_t { install = 1 };
 
 struct PackageAction {
