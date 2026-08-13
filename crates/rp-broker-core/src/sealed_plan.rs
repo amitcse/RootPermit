@@ -453,7 +453,7 @@ mod tests {
             store.seal_plan(
                 PlanHandle::parse("AgICAgICAgICAgICAgICAg").unwrap(),
                 b"m",
-                &[digest.clone()]
+                std::slice::from_ref(&digest)
             ),
             Err(SealedPlanError::UnsafeRoot)
         ));
