@@ -210,6 +210,7 @@ impl SealedPlanStore {
             }
             Err(error) => return Err(error.into()),
         }
+        fs::set_permissions(&plan_path, fs::Permissions::from_mode(0o700))?;
         let plan = open_child_directory(&self.plans, handle.as_str())?;
         validate_directory(&plan, self.expected_uid, 0o077)?;
         let mut manifest_file = OpenOptions::new()
