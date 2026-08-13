@@ -210,7 +210,6 @@ impl SealedPlanStore {
             }
             Err(error) => return Err(error.into()),
         }
-        fs::set_permissions(&plan_path, fs::Permissions::from_mode(0o500))?;
         let plan = open_child_directory(&self.plans, handle.as_str())?;
         validate_directory(&plan, self.expected_uid, 0o077)?;
         let mut manifest_file = OpenOptions::new()
@@ -221,6 +220,7 @@ impl SealedPlanStore {
             .open(child_path(&plan, MANIFEST_NAME))?;
         manifest_file.write_all(manifest)?;
         manifest_file.sync_all()?;
+        fs::set_permissions(&plan_path, fs::Permissions::from_mode(0o500))?;
         fs::set_permissions(
             child_path(&plan, MANIFEST_NAME),
             fs::Permissions::from_mode(0o400),
