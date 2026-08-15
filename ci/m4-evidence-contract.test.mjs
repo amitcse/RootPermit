@@ -19,3 +19,29 @@ test("ready fixtures cannot omit adversarial evidence requirements", () => {
   assert.match(validateM4EvidenceContract({ unitText, fixture: ready }).join("\n"), /sealed input role/);
   assert.match(validateM4EvidenceContract({ unitText, fixture: ready }).join("\n"), /TM-10 through TM-13/);
 });
+
+test("duplicate or widened systemd policies fail the sealed-helper contract", () => {
+  const withInjectedEnvironment = `${unitText}\nEnvironment=LD_PRELOAD=/tmp/evil.so\n`;
+  assert.match(
+    validateM4EvidenceContract({ unitText: withInjectedEnvironment, fixture }).join("\n"),
+    /Environment/,
+  );
+  const withExtraWritePath = unitText.replace(
+    "ReadWritePaths=/var/lib/rootpermit/journal",
+    "ReadWritePaths=/var/lib/rootpermit/journal /etc",
+  );
+  assert.match(
+    validateM4EvidenceContract({ unitText: withExtraWritePath, fixture }).join("\n"),
+    /ReadWritePaths/,
+  );
+  const withoutLiveAptMasks = unitText.replace(/^InaccessiblePaths=.*\n/m, "");
+  assert.match(
+    validateM4EvidenceContract({ unitText: withoutLiveAptMasks, fixture }).join("\n"),
+    /InaccessiblePaths/,
+  );
+  const withBindMount = `${unitText}\nBindPaths=/var/lib/apt:/var/lib/rootpermit/store\n`;
+  assert.match(
+    validateM4EvidenceContract({ unitText: withBindMount, fixture }).join("\n"),
+    /BindPaths/,
+  );
+});

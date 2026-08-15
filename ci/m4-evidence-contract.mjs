@@ -8,30 +8,60 @@ const REQUIRED_UNIT_DIRECTIVES = new Map([
   ["RestrictAddressFamilies", "AF_UNIX"],
   ["IPAddressDeny", "any"],
   ["UMask", "0077"],
+  ["CapabilityBoundingSet", "~CAP_SYS_ADMIN"],
+]);
+
+const REQUIRED_REPEATABLE_DIRECTIVES = new Map([
+  ["Environment", ["LANG=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"]],
+  ["SystemCallFilter", ["@system-service", "~@mount"]],
+  ["ReadOnlyPaths", ["/var/lib/rootpermit/plans /var/lib/rootpermit/store"]],
+  ["ReadWritePaths", ["/var/lib/rootpermit/journal"]],
+  [
+    "InaccessiblePaths",
+    ["/etc/apt /etc/dpkg /var/lib/apt /var/cache/apt /var/lib/dpkg/info /var/lib/dpkg/triggers"],
+  ],
+]);
+
+const FORBIDDEN_DIRECTIVES = new Set([
+  "AmbientCapabilities",
+  "BindPaths",
+  "BindReadOnlyPaths",
+  "EnvironmentFile",
+  "ExecSearchPath",
+  "PassEnvironment",
+  "RootDirectory",
+  "RootImage",
+  "SetLoginEnvironment",
+  "TemporaryFileSystem",
+  "UnsetEnvironment",
 ]);
 
 export function validateM4EvidenceContract({ unitText, fixture }) {
   const errors = [];
-  const directives = new Map(
-    unitText
+  const directives = new Map();
+  for (const [name, value] of unitText
       .split(/\r?\n/)
-      .filter((line) => !line.startsWith("#") && line.includes("="))
+      .filter((line) => !line.trimStart().startsWith("#") && line.includes("="))
       .map((line) => {
         const separator = line.indexOf("=");
-        return [line.slice(0, separator), line.slice(separator + 1)];
-      }),
-  );
+        return [line.slice(0, separator).trim(), line.slice(separator + 1).trim()];
+      })) {
+    const values = directives.get(name) ?? [];
+    values.push(value);
+    directives.set(name, values);
+  }
   for (const [name, value] of REQUIRED_UNIT_DIRECTIVES) {
-    if (directives.get(name) !== value) errors.push(`systemd ${name} must be ${value}`);
+    const values = directives.get(name) ?? [];
+    if (values.length !== 1 || values[0] !== value) errors.push(`systemd ${name} must be ${value}`);
   }
-  if (directives.get("Environment") !== "PATH=/usr/sbin:/usr/bin:/sbin:/bin") {
-    errors.push("systemd helper must have an exact broker-compatible PATH");
+  for (const [name, expected] of REQUIRED_REPEATABLE_DIRECTIVES) {
+    const actual = directives.get(name) ?? [];
+    if (actual.length !== expected.length || actual.some((value, index) => value !== expected[index])) {
+      errors.push(`systemd ${name} must contain only the sealed-helper policy values`);
+    }
   }
-  if (!unitText.includes("ReadOnlyPaths=/var/lib/rootpermit/plans /var/lib/rootpermit/store")) {
-    errors.push("systemd helper must expose only sealed plan and store inputs read-only");
-  }
-  if (!unitText.includes("ReadWritePaths=/var/lib/rootpermit/journal")) {
-    errors.push("systemd helper must constrain writes to the execution journal");
+  for (const name of FORBIDDEN_DIRECTIVES) {
+    if (directives.has(name)) errors.push(`systemd ${name} is not permitted for the sealed helper`);
   }
   if (fixture.status === "ready") {
     const sealed = fixture.sealed_inputs;

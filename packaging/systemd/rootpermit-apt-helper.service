@@ -30,12 +30,15 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+SystemCallFilter=~@mount
 SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=~CAP_SYS_ADMIN
 UMask=0077
 Environment=LANG=C
 Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
 ReadOnlyPaths=/var/lib/rootpermit/plans /var/lib/rootpermit/store
 ReadWritePaths=/var/lib/rootpermit/journal
+InaccessiblePaths=/etc/apt /etc/dpkg /var/lib/apt /var/cache/apt /var/lib/dpkg/info /var/lib/dpkg/triggers
 
 [Install]
 RequiredBy=rootpermitd.service

@@ -107,49 +107,16 @@ impl ExecutionJournal {
         Ok(sequence)
     }
 
-    /// Re-reads a durable journal and returns only a result that its own marker
-    /// order proves.  Ambiguous executions never auto-retry.
+    /// Re-reads a durable journal without inferring a package-manager result.
+    ///
+    /// Markers establish only that an execution *might* have crossed a phase.
+    /// They do not bind a request/plan, a receipt, or the resulting installed
+    /// package state.  Until the root reconciliation path verifies those
+    /// external proofs, every syntactically valid journal is ambiguous.
     pub fn classify(path: &Path) -> Result<RecoveryClassification, JournalError> {
         let contents = std::fs::read(path)?;
-        let next = parse_records(&contents)?;
-        if next == 1 {
-            return Ok(RecoveryClassification::RecoveryRequired);
-        }
-        let markers = records(&contents)?;
-        let final_state = markers.last().copied() == Some(JournalMarker::FinalStateCommitted);
-        let Some(result_index) = markers.iter().position(|marker| {
-            matches!(
-                marker,
-                JournalMarker::ResultSucceeded | JournalMarker::ResultFailed
-            )
-        }) else {
-            return Ok(RecoveryClassification::RecoveryRequired);
-        };
-        let expected_prefix = [
-            JournalMarker::HelperHandoff,
-            JournalMarker::SimulationProved,
-            JournalMarker::ExecutionStarted,
-        ];
-        let receipt_after_result = markers
-            .iter()
-            .skip(result_index + 1)
-            .any(|marker| *marker == JournalMarker::ReceiptCreated);
-        if !final_state || !markers.starts_with(&expected_prefix) || !receipt_after_result {
-            return Ok(RecoveryClassification::RecoveryRequired);
-        }
-        let succeeded = markers
-            .iter()
-            .filter(|marker| **marker == JournalMarker::ResultSucceeded)
-            .count();
-        let failed = markers
-            .iter()
-            .filter(|marker| **marker == JournalMarker::ResultFailed)
-            .count();
-        match (succeeded, failed) {
-            (1, 0) => Ok(RecoveryClassification::Succeeded),
-            (0, 1) => Ok(RecoveryClassification::Failed),
-            _ => Ok(RecoveryClassification::RecoveryRequired),
-        }
+        records(&contents)?;
+        Ok(RecoveryClassification::RecoveryRequired)
     }
 }
 
@@ -201,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_single_proven_result_with_receipt_and_final_commit_is_terminal() {
+    fn terminal_markers_remain_recovery_required_without_external_state_proof() {
         let path = path();
         let mut journal = ExecutionJournal::open(&path).unwrap();
         journal.append(JournalMarker::HelperHandoff).unwrap();
@@ -216,7 +183,7 @@ mod tests {
         journal.append(JournalMarker::FinalStateCommitted).unwrap();
         assert_eq!(
             ExecutionJournal::classify(&path).unwrap(),
-            RecoveryClassification::Succeeded
+            RecoveryClassification::RecoveryRequired
         );
         std::fs::remove_file(path).unwrap();
     }
@@ -243,6 +210,24 @@ mod tests {
         let mut journal = ExecutionJournal::open(&path).unwrap();
         journal.append(JournalMarker::ResultSucceeded).unwrap();
         journal.append(JournalMarker::ReceiptCreated).unwrap();
+        journal.append(JournalMarker::FinalStateCommitted).unwrap();
+        assert_eq!(
+            ExecutionJournal::classify(&path).unwrap(),
+            RecoveryClassification::RecoveryRequired
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn out_of_order_but_well_formed_markers_never_claim_a_terminal_result() {
+        let path = path();
+        let mut journal = ExecutionJournal::open(&path).unwrap();
+        journal.append(JournalMarker::HelperHandoff).unwrap();
+        journal.append(JournalMarker::SimulationProved).unwrap();
+        journal.append(JournalMarker::ExecutionStarted).unwrap();
+        journal.append(JournalMarker::ResultSucceeded).unwrap();
+        journal.append(JournalMarker::ReceiptCreated).unwrap();
+        journal.append(JournalMarker::ArchivesAccepted).unwrap();
         journal.append(JournalMarker::FinalStateCommitted).unwrap();
         assert_eq!(
             ExecutionJournal::classify(&path).unwrap(),
