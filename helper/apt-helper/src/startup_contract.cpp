@@ -17,6 +17,7 @@ namespace {
 constexpr std::array<std::string_view, 2> kAllowedEnvironment{
     "LANG=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"};
 constexpr std::size_t kMaxManifestBytes = 1U << 20U;
+constexpr std::size_t kMaxObjectBytes = 128U << 20U;
 constexpr std::size_t kMaxGraphActions = 16'384;
 constexpr std::size_t kMaxInputs = 16'384;
 
@@ -155,6 +156,36 @@ class Sha256 {
   std::uint8_t different = 0;
   for (std::size_t index = 0; index < left.size(); ++index) different |= left[index] ^ right[index];
   return different == 0;
+}
+
+[[nodiscard]] bool safe_regular_file(const struct stat& metadata,
+                                     const std::size_t maximum_bytes) noexcept {
+  return S_ISREG(metadata.st_mode) && metadata.st_uid == 0 &&
+         (metadata.st_mode & 0222U) == 0U && metadata.st_nlink == 1 &&
+         metadata.st_size >= 0 &&
+         static_cast<std::uint64_t>(metadata.st_size) <= maximum_bytes;
+}
+
+[[nodiscard]] bool read_fd(const int fd, std::vector<std::uint8_t>* output,
+                           const std::size_t maximum_bytes) noexcept {
+  output->clear();
+  std::array<std::uint8_t, 8192> buffer{};
+  while (true) {
+    const auto count = ::read(fd, buffer.data(), buffer.size());
+    if (count == 0) return true;
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (output->size() > maximum_bytes - static_cast<std::size_t>(count)) return false;
+    output->insert(output->end(), buffer.begin(), buffer.begin() + count);
+  }
+}
+
+[[nodiscard]] int open_sealed_child(const int parent_fd, const std::string_view name) noexcept {
+  if (!is_lower_hex_digest(name) && name != "manifest.cbor") return -1;
+  std::string nul_terminated{name};
+  return ::openat(parent_fd, nul_terminated.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
 }
 
 struct CborValue {
@@ -407,6 +438,63 @@ std::string_view immutable_input_error_name(const ImmutableInputError error) noe
     case ImmutableInputError::object_name_digest_mismatch: return "object_name_digest_mismatch"; case ImmutableInputError::object_digest_mismatch: return "object_digest_mismatch";
     case ImmutableInputError::not_regular_file: return "not_regular_file"; case ImmutableInputError::owner_not_root: return "owner_not_root";
     case ImmutableInputError::writable_by_group_or_other: return "writable_by_group_or_other"; case ImmutableInputError::hardlink_present: return "hardlink_present";
+  }
+  return "unknown";
+}
+
+SealedPlanError verify_sealed_plan(const int plan_root_fd, const int content_store_fd,
+                                   const Digest& manifest_digest,
+                                   PlanManifest* manifest) noexcept {
+  if (manifest == nullptr) return SealedPlanError::manifest_invalid;
+  const auto manifest_fd = open_sealed_child(plan_root_fd, "manifest.cbor");
+  if (manifest_fd < 0) return errno == ENOENT ? SealedPlanError::manifest_missing : SealedPlanError::io_failure;
+  struct stat manifest_metadata {};
+  if (::fstat(manifest_fd, &manifest_metadata) != 0 ||
+      !safe_regular_file(manifest_metadata, kMaxManifestBytes)) {
+    ::close(manifest_fd);
+    return SealedPlanError::manifest_unsafe;
+  }
+  std::vector<std::uint8_t> encoded_manifest;
+  const auto read_manifest = read_fd(manifest_fd, &encoded_manifest, kMaxManifestBytes);
+  ::close(manifest_fd);
+  if (!read_manifest) return SealedPlanError::io_failure;
+  if (!constant_time_equal(sha256(encoded_manifest), manifest_digest)) {
+    return SealedPlanError::manifest_digest_mismatch;
+  }
+  PlanManifest parsed{};
+  if (parse_plan_manifest(encoded_manifest, &parsed) != ManifestError::none) {
+    return SealedPlanError::manifest_invalid;
+  }
+  for (const auto& input : parsed.inputs) {
+    const auto name = digest_hex(input.digest);
+    const auto object_fd = open_sealed_child(content_store_fd, name);
+    if (object_fd < 0) return errno == ENOENT ? SealedPlanError::input_missing : SealedPlanError::io_failure;
+    struct stat metadata {};
+    if (::fstat(object_fd, &metadata) != 0 || !safe_regular_file(metadata, kMaxObjectBytes)) {
+      ::close(object_fd);
+      return SealedPlanError::input_unsafe;
+    }
+    std::vector<std::uint8_t> bytes;
+    const auto read_object = read_fd(object_fd, &bytes, kMaxObjectBytes);
+    ::close(object_fd);
+    if (!read_object) return SealedPlanError::io_failure;
+    if (!constant_time_equal(sha256(bytes), input.digest)) return SealedPlanError::input_digest_mismatch;
+  }
+  *manifest = std::move(parsed);
+  return SealedPlanError::none;
+}
+
+std::string_view sealed_plan_error_name(const SealedPlanError error) noexcept {
+  switch (error) {
+    case SealedPlanError::none: return "none";
+    case SealedPlanError::manifest_missing: return "manifest_missing";
+    case SealedPlanError::manifest_unsafe: return "manifest_unsafe";
+    case SealedPlanError::manifest_digest_mismatch: return "manifest_digest_mismatch";
+    case SealedPlanError::manifest_invalid: return "manifest_invalid";
+    case SealedPlanError::input_missing: return "input_missing";
+    case SealedPlanError::input_unsafe: return "input_unsafe";
+    case SealedPlanError::input_digest_mismatch: return "input_digest_mismatch";
+    case SealedPlanError::io_failure: return "io_failure";
   }
   return "unknown";
 }

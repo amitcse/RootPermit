@@ -1,0 +1,44 @@
+[Unit]
+Description=RootPermit sealed APT helper
+Documentation=https://github.com/amitcse/RootPermit
+After=rootpermitd.service
+Requires=rootpermitd.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/lib/rootpermit/rootpermit-apt-helper
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=~CAP_SYS_ADMIN
+UMask=0077
+Environment=LANG=C
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+ReadOnlyPaths=/var/lib/rootpermit/plans /var/lib/rootpermit/store
+ReadWritePaths=/var/lib/rootpermit/journal
+InaccessiblePaths=/etc/apt /etc/dpkg /var/lib/apt /var/cache/apt /var/lib/dpkg/info /var/lib/dpkg/triggers
+
+[Install]
+RequiredBy=rootpermitd.service

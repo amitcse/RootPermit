@@ -14,6 +14,11 @@
     clippy::type_complexity
 )]
 
+/// Append-only execution markers and fail-closed recovery classification.
+pub mod execution_journal;
+/// Root-owned, descriptor-relative sealed-plan storage for the M4 helper.
+pub mod sealed_plan;
+
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::SigningKey;
 use rp_protocol::{

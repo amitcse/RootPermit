@@ -74,6 +74,8 @@ jobs:
       - run: cmake -S helper/apt-helper -B build/apt-helper -DBUILD_TESTING=ON
       - run: cmake --build build/apt-helper --parallel
       - run: ctest --test-dir build/apt-helper --output-on-failure
+      - name: Prove root-owned sealed-plan verification accepts only sealed inputs
+        run: sudo -E env "PATH=$PATH" ctest --test-dir build/apt-helper --output-on-failure --tests-regex rootpermit-apt-helper-contract
       - run: npm ci
       - run: npm run ci:contract
       - run: npm run check
@@ -135,7 +137,8 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm ci
       - run: node ci/validate-fixtures.mjs fixtures
-      - run: node --test ci/lane-selection.test.mjs ci/fixture-validation.test.mjs
+      - run: node --test ci/lane-selection.test.mjs ci/fixture-validation.test.mjs ci/m4-evidence-contract.test.mjs
+      - run: node ci/m4-evidence-contract.mjs
       - name: State the required follow-up evidence lane
         run: |
           echo "M4-affecting pull requests require the privileged-nightly fixture evidence before release-candidate promotion."

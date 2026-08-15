@@ -20,6 +20,7 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci
+      - run: node ci/m4-evidence-contract.mjs
       - name: Provision and checksum verify isolated fixture input
         shell: bash
         run: |

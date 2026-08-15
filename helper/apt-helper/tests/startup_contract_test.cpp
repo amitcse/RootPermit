@@ -2,8 +2,11 @@
 
 #include <array>
 #include <cstdlib>
+#include <fcntl.h>
 #include <iostream>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -15,6 +18,7 @@ using rootpermit::apt_helper::ImmutableInputError;
 using rootpermit::apt_helper::ImmutableObjectMetadata;
 using rootpermit::apt_helper::PackageAction;
 using rootpermit::apt_helper::StartupContractError;
+using rootpermit::apt_helper::SealedPlanError;
 using rootpermit::apt_helper::validate_handoff_contract;
 using rootpermit::apt_helper::validate_immutable_object;
 using rootpermit::apt_helper::validate_startup_contract;
@@ -136,5 +140,99 @@ int main() {
   passed = expect(rootpermit::apt_helper::parse_plan_manifest(manifest, &parsed) ==
                       rootpermit::apt_helper::ManifestError::unknown_field,
                   "unknown plan manifest field is rejected") && passed;
+
+  // The descriptor-relative verifier is tested without ever starting APT. A
+  // normal CTest process must reject its non-root fixture; CI repeats this
+  // same test under sudo to prove the root-owned positive path.
+  std::vector<std::uint8_t> sealed_manifest{0xa8, 0x01, 0x01, 0x02, 0x58, 0x20};
+  sealed_manifest.insert(sealed_manifest.end(), 32, 0x01);
+  constexpr std::array<std::uint8_t, 3> kSealedObject{'a', 'b', 'c'};
+  const std::string sealed_object_name =
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+  const auto sealed_object_digest = digest_from_hex(sealed_object_name);
+  sealed_manifest.insert(sealed_manifest.end(), {0x03, 0x81, 0xa2, 0x01, 0x58, 0x20});
+  sealed_manifest.insert(sealed_manifest.end(), sealed_object_digest.begin(),
+                         sealed_object_digest.end());
+  sealed_manifest.insert(sealed_manifest.end(), {0x02, 0x01, 0x04, 0x80, 0x05, 0x58, 0x20});
+  sealed_manifest.insert(sealed_manifest.end(), 32, 0x02);
+  sealed_manifest.insert(sealed_manifest.end(), {0x06, 0x00, 0x07, 0x61, 'x', 0x08, 0x58, 0x20});
+  sealed_manifest.insert(sealed_manifest.end(), 32, 0x03);
+  const auto verifier_root = "/tmp/rootpermit-sealed-plan-" + std::to_string(::getpid());
+  const auto plan_root = verifier_root + "/plan";
+  const auto store_root = verifier_root + "/store";
+  ::mkdir(verifier_root.c_str(), 0700);
+  ::mkdir(plan_root.c_str(), 0700);
+  ::mkdir(store_root.c_str(), 0700);
+  const auto manifest_path = plan_root + "/manifest.cbor";
+  const auto manifest_fd = ::open(manifest_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0400);
+  passed = expect(manifest_fd >= 0 &&
+                      ::write(manifest_fd, sealed_manifest.data(), sealed_manifest.size()) ==
+                          static_cast<ssize_t>(sealed_manifest.size()) &&
+                      ::close(manifest_fd) == 0,
+                  "sealed manifest fixture is written") && passed;
+  const auto object_path = store_root + "/" + sealed_object_name;
+  const auto object_fd = ::open(object_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0400);
+  passed = expect(object_fd >= 0 &&
+                      ::write(object_fd, kSealedObject.data(), kSealedObject.size()) ==
+                          static_cast<ssize_t>(kSealedObject.size()) &&
+                      ::close(object_fd) == 0,
+                  "sealed content-addressed object fixture is written") && passed;
+  const auto plan_fd = ::open(plan_root.c_str(), O_RDONLY | O_DIRECTORY);
+  const auto store_fd = ::open(store_root.c_str(), O_RDONLY | O_DIRECTORY);
+  const auto sealed_result = rootpermit::apt_helper::verify_sealed_plan(
+      plan_fd, store_fd,
+      digest_from_hex("5bf9b832574b904cd1938d5b18886bd24774f4d379abb5c648e1e1284c61eeb7"),
+      &parsed);
+  const auto expected_sealed_result = ::geteuid() == 0 ? SealedPlanError::none : SealedPlanError::manifest_unsafe;
+  passed = expect(sealed_result == expected_sealed_result,
+                  "sealed verifier rejects non-root fixture owners and accepts root-owned inputs") && passed;
+  if (::geteuid() == 0) {
+    passed = expect(rootpermit::apt_helper::verify_sealed_plan(
+                        plan_fd, store_fd, Digest{}, &parsed) ==
+                        SealedPlanError::manifest_digest_mismatch,
+                    "sealed verifier rejects a swapped manifest digest") && passed;
+    ::chmod(object_path.c_str(), 0600);
+    passed = expect(rootpermit::apt_helper::verify_sealed_plan(
+                        plan_fd, store_fd,
+                        digest_from_hex("5bf9b832574b904cd1938d5b18886bd24774f4d379abb5c648e1e1284c61eeb7"),
+                        &parsed) == SealedPlanError::input_unsafe,
+                    "sealed verifier rejects a writable object") && passed;
+    ::chmod(object_path.c_str(), 0400);
+    const auto swapped_object_fd = ::open(object_path.c_str(), O_WRONLY);
+    constexpr std::array<std::uint8_t, 3> kSwappedObject{'a', 'b', 'd'};
+    passed = expect(swapped_object_fd >= 0 &&
+                        ::write(swapped_object_fd, kSwappedObject.data(), kSwappedObject.size()) ==
+                            static_cast<ssize_t>(kSwappedObject.size()) &&
+                        ::close(swapped_object_fd) == 0 &&
+                        ::chmod(object_path.c_str(), 0400) == 0,
+                    "sealed object swap fixture is written") && passed;
+    passed = expect(rootpermit::apt_helper::verify_sealed_plan(
+                        plan_fd, store_fd,
+                        digest_from_hex("5bf9b832574b904cd1938d5b18886bd24774f4d379abb5c648e1e1284c61eeb7"),
+                        &parsed) == SealedPlanError::input_digest_mismatch,
+                    "sealed verifier rejects a digest-mismatched object") && passed;
+    const auto restore_object_fd = ::open(object_path.c_str(), O_WRONLY);
+    passed = expect(restore_object_fd >= 0 &&
+                        ::write(restore_object_fd, kSealedObject.data(), kSealedObject.size()) ==
+                            static_cast<ssize_t>(kSealedObject.size()) &&
+                        ::close(restore_object_fd) == 0 &&
+                        ::chmod(object_path.c_str(), 0400) == 0,
+                    "sealed object fixture is restored") && passed;
+    const auto hardlink_path = store_root + "/hardlink";
+    passed = expect(::link(object_path.c_str(), hardlink_path.c_str()) == 0 &&
+                        rootpermit::apt_helper::verify_sealed_plan(
+                            plan_fd, store_fd,
+                            digest_from_hex("5bf9b832574b904cd1938d5b18886bd24774f4d379abb5c648e1e1284c61eeb7"),
+                            &parsed) == SealedPlanError::input_unsafe,
+                    "sealed verifier rejects a hardlinked object") && passed;
+    ::unlink(hardlink_path.c_str());
+  }
+  ::close(plan_fd);
+  ::close(store_fd);
+  ::unlink(object_path.c_str());
+  ::unlink(manifest_path.c_str());
+  ::rmdir(plan_root.c_str());
+  ::rmdir(store_root.c_str());
+  ::rmdir(verifier_root.c_str());
   return passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }
